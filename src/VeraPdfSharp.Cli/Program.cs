@@ -36,6 +36,7 @@ if (flavour == PDFAFlavour.NoFlavour)
 }
 
 using var parser = PdfLexerValidationParser.FromFile(file, flavour);
+
 var validator = ValidatorFactory.CreateValidator(new[] { flavour }, new ValidatorOptions(ShowErrorMessages: true));
 var result = validator.Validate(parser);
 
