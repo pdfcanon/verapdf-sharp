@@ -121,7 +121,9 @@ public sealed class PdfLexerValidationParser : IValidationParser
     {
         const string namespaceUri = "http://www.aiim.org/pdfa/ns/id/";
         var schema = document.Descendants()
-            .FirstOrDefault(x => x.Elements().Any(e => e.Name.NamespaceName == namespaceUri));
+            .FirstOrDefault(x =>
+                x.Elements().Any(e => e.Name.NamespaceName == namespaceUri) ||
+                x.Attributes().Any(a => a.Name.NamespaceName == namespaceUri));
 
         if (schema is null)
         {
@@ -129,13 +131,13 @@ public sealed class PdfLexerValidationParser : IValidationParser
         }
 
         XNamespace ns = namespaceUri;
-        var partText = schema.Element(ns + "part")?.Value;
+        var partText = schema.Element(ns + "part")?.Value ?? schema.Attribute(ns + "part")?.Value;
         if (!int.TryParse(partText, out var part))
         {
             return PDFAFlavour.NoFlavour;
         }
 
-        var conformance = schema.Element(ns + "conformance")?.Value?.Trim().ToLowerInvariant() ?? "";
+        var conformance = (schema.Element(ns + "conformance")?.Value ?? schema.Attribute(ns + "conformance")?.Value)?.Trim().ToLowerInvariant() ?? "";
         var id = $"{part}{conformance}";
         return PDFAFlavours.ByFlavourId(id);
     }
@@ -144,7 +146,9 @@ public sealed class PdfLexerValidationParser : IValidationParser
     {
         const string namespaceUri = "http://www.aiim.org/pdfua/ns/id/";
         var schema = document.Descendants()
-            .FirstOrDefault(x => x.Elements().Any(e => e.Name.NamespaceName == namespaceUri));
+            .FirstOrDefault(x =>
+                x.Elements().Any(e => e.Name.NamespaceName == namespaceUri) ||
+                x.Attributes().Any(a => a.Name.NamespaceName == namespaceUri));
 
         if (schema is null)
         {
@@ -152,7 +156,7 @@ public sealed class PdfLexerValidationParser : IValidationParser
         }
 
         XNamespace ns = namespaceUri;
-        var partText = schema.Element(ns + "part")?.Value;
+        var partText = schema.Element(ns + "part")?.Value ?? schema.Attribute(ns + "part")?.Value;
         if (!int.TryParse(partText, out var part))
         {
             return PDFAFlavour.NoFlavour;
@@ -206,8 +210,57 @@ internal sealed class PdfModelBuilder
     private static readonly PdfName CIDSetName = new("CIDSet");
     private static readonly PdfName DestOutputProfileName = new("DestOutputProfile");
     private static readonly PdfName DestOutputProfileRefName = new("DestOutputProfileRef");
+
+    // Glyph names present in PdfLexer's GlyphNames but absent from veraPDF's
+    // standard Adobe Glyph List. For Type1 fonts without a ToUnicode CMap,
+    // these names must not produce a non-null toUnicode value.
+    private static readonly HashSet<string> TexSpecificGlyphNames = new(StringComparer.Ordinal)
+    {
+        "angbracketleftbig", "angbracketleftBig", "angbracketleftbigg", "angbracketleftBigg",
+        "angbracketrightBig", "angbracketrightbig", "angbracketrightBigg", "angbracketrightbigg",
+        "arrowhookleft", "arrowhookright",
+        "arrowlefttophalf", "arrowleftbothalf",
+        "arrownortheast", "arrownorthwest",
+        "arrowrighttophalf", "arrowrightbothalf",
+        "arrowsoutheast", "arrowsouthwest",
+        "backslashbig", "backslashBig", "backslashBigg", "backslashbigg",
+        "bardbl",
+        "bracehtipdownleft", "bracehtipdownright", "bracehtipupleft", "bracehtipupright",
+        "braceleftBig", "braceleftbig", "braceleftbigg", "braceleftBigg",
+        "bracerightBig", "bracerightbig", "bracerightbigg", "bracerightBigg",
+        "bracketleftbig", "bracketleftBig", "bracketleftbigg", "bracketleftBigg",
+        "bracketrightBig", "bracketrightbig", "bracketrightbigg", "bracketrightBigg",
+        "ceilingleftbig", "ceilingleftBig", "ceilingleftBigg", "ceilingleftbigg",
+        "ceilingrightbig", "ceilingrightBig", "ceilingrightbigg", "ceilingrightBigg",
+        "circledotdisplay", "circledottext",
+        "circlemultiplydisplay", "circlemultiplytext",
+        "circleplusdisplay", "circleplustext",
+        "contintegraldisplay", "contintegraltext",
+        "coproductdisplay", "coproducttext",
+        "floorleftBig", "floorleftbig", "floorleftbigg", "floorleftBigg",
+        "floorrightbig", "floorrightBig", "floorrightBigg", "floorrightbigg",
+        "hatwide", "hatwider", "hatwidest",
+        "intercal",
+        "integraldisplay", "integraltext",
+        "intersectiondisplay", "intersectiontext",
+        "logicalanddisplay", "logicalandtext",
+        "logicalordisplay", "logicalortext",
+        "parenleftBig", "parenleftbig", "parenleftBigg", "parenleftbigg",
+        "parenrightBig", "parenrightbig", "parenrightBigg", "parenrightbigg",
+        "prime",
+        "productdisplay", "producttext",
+        "radicalbig", "radicalBig", "radicalBigg", "radicalbigg",
+        "radicalbt", "radicaltp", "radicalvertex",
+        "slashbig", "slashBig", "slashBigg", "slashbigg",
+        "summationdisplay", "summationtext",
+        "tildewide", "tildewider", "tildewidest",
+        "uniondisplay", "unionmultidisplay", "unionmultitext",
+        "unionsqdisplay", "unionsqtext", "uniontext",
+        "vextenddouble", "vextendsingle"
+    };
     private static readonly PdfName DisplayDocTitleName = new("DisplayDocTitle");
     private static readonly PdfName FieldsName = new("Fields");
+    private static readonly PdfName HTOName = new("HTO");
     private static readonly PdfName HTPName = new("HTP");
     private static readonly PdfName InterpolateName = new("Interpolate");
     private static readonly PdfName KidsName = new("K");
@@ -242,6 +295,9 @@ internal sealed class PdfModelBuilder
     private static readonly PdfName CTName = new("CT");
     private static readonly PdfName FTName = new("FT");
     private static readonly PdfName AnnotsName = new("Annots");
+    private static readonly PdfName SMaskName = new("SMask");
+    private static readonly PdfName BMName = new("BM");
+    private static readonly PdfName AFName = new("AF");
 
     // PDF 1.7 (ISO 32000-1:2008, 14.8.4) standard structure types — used for remapping checks (rule 7.1/7)
     private static readonly HashSet<string> Pdf17StandardStructTypes = new(StringComparer.Ordinal)
@@ -263,6 +319,14 @@ internal sealed class PdfModelBuilder
         "Artifact",
         // PDF 2.0 standard structure types (ISO 32000-2:2020)
         "DocumentFragment", "Aside", "Title", "FENote", "Sub", "Em", "Strong"
+    };
+
+    // Standard namespace URIs (PDF 2.0, ISO 32000-2:2020, 14.8.6)
+    private static readonly HashSet<string> StandardNamespaceUrls = new(StringComparer.Ordinal)
+    {
+        "http://iso.org/pdf/ssn",      // PDF 1.7
+        "http://iso.org/pdf2/ssn",     // PDF 2.0
+        "http://www.w3.org/1998/Math/MathML"  // MathML
     };
 
     private static readonly HashSet<string> AnnotationSubtypes = new(StringComparer.Ordinal)
@@ -299,7 +363,9 @@ internal sealed class PdfModelBuilder
     private readonly Dictionary<PdfDictionary, TableCellGeometry> _tableCellGeometryCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly HashSet<PdfStream> _formXObjectsWithMcids = new(ReferenceEqualityComparer<PdfStream>.Instance);
     private readonly Dictionary<PdfStream, int> _formXObjectRefCount = new(ReferenceEqualityComparer<PdfStream>.Instance);
+    private readonly HashSet<PdfStream> _referencedFormXObjects = new(ReferenceEqualityComparer<PdfStream>.Instance);
     private readonly HashSet<string> _duplicateNoteIds = new(StringComparer.Ordinal);
+    private HashSet<PdfDictionary>? _afReferencedFileSpecs;
     private bool _structureInitialized;
     private PdfDictionary? _currentPageDict;
 
@@ -310,8 +376,51 @@ internal sealed class PdfModelBuilder
         _sourceName = sourceName;
     }
 
+    private void PreScanReferencedFormXObjects()
+    {
+        foreach (var page in _document.Pages)
+        {
+            try
+            {
+                var nodes = new PdfPage(page.NativeObject).GetContentModel();
+                CollectReferencedFormXObjects(nodes);
+            }
+            catch
+            {
+                // Skip pages that fail to parse
+            }
+        }
+    }
+
+    private void CollectReferencedFormXObjects(IReadOnlyList<IContentGroup<double>> nodes)
+    {
+        foreach (var node in nodes)
+        {
+            if (node is FormContent<double> form)
+            {
+                _referencedFormXObjects.Add(form.Stream);
+                try
+                {
+                    CollectReferencedFormXObjects(form.Parse().OfType<IContentGroup<double>>().ToList());
+                }
+                catch
+                {
+                    // Skip forms that fail to parse
+                }
+            }
+            else if (node is MarkedContentGroup<double> mcg)
+            {
+                CollectReferencedFormXObjects(mcg.Children.OfType<IContentGroup<double>>().ToList());
+            }
+        }
+    }
+
     public IModelObject BuildRoot()
     {
+        // Pre-scan content streams to identify which form XObjects are actually
+        // referenced (invoked via Do operator). veraPDF only validates referenced XObjects.
+        PreScanReferencedFormXObjects();
+
         var trailer = BuildObject(_document.Trailer, relationName: "trailer");
         var document = BuildObject(_document.Catalog, relationName: "document");
 
@@ -330,10 +439,29 @@ internal sealed class PdfModelBuilder
         root.Set("NeedsRendering", document.GetPropertyValue("NeedsRendering"));
         root.Set("DisplayDocTitle", document.GetPropertyValue("DisplayDocTitle"));
         root.Set("ViewerPreferences", document.GetPropertyValue("ViewerPreferences"));
-        root.Set("lastID", document.GetPropertyValue("lastID"));
+        root.Set("lastID", document.GetPropertyValue("lastIDValue"));
         root.Set("lastIDValue", document.GetPropertyValue("lastIDValue"));
-        root.Set("firstPageID", document.GetPropertyValue("firstPageID"));
+        root.Set("firstPageID", document.GetPropertyValue("firstPageIDValue"));
         root.Set("firstPageIDValue", document.GetPropertyValue("firstPageIDValue"));
+
+        // CosDocument properties derived from the catalog
+        var namesDict = _document.Catalog.GetOptionalValue<PdfDictionary>(PdfName.Names);
+        root.Set("containsEmbeddedFiles", namesDict?.ContainsKey(new PdfName("EmbeddedFiles")) ?? false);
+        root.Set("isOptionalContentPresent", _document.Catalog.ContainsKey(OCPropertiesName));
+        root.Set("containsAlternatePresentations", namesDict?.ContainsKey(new PdfName("AlternatePresentations")) ?? false);
+        root.Set("containsPieceInfo", _document.Catalog.ContainsKey(new PdfName("PieceInfo")));
+        root.Set("containsInfo", _document.Trailer.ContainsKey(new PdfName("Info")));
+        root.Set("nrIndirects", _document.XrefEntries?.Count ?? 0);
+        root.Set("Requirements", _document.Catalog.ContainsKey(new PdfName("Requirements")) ? "present" : null);
+
+        // PDF version from catalog /Version key (overrides header version per ISO 32000-1:2008, 7.2.2)
+        var catalogVersion = ConvertPdfObjectToString(_document.Catalog.Get(new PdfName("Version")));
+        root.Set("Version", catalogVersion);
+
+        // containsPDFAIdentification: determined from XMP metadata, set on CosDocument for profile rules
+        var xmpSnapshot = GetXmpSnapshotFromCatalog();
+        root.Set("containsPDFAIdentification", xmpSnapshot?.PdfAIdentification is not null);
+
         root.Link("trailer", trailer);
         root.Link("document", document);
 
@@ -379,6 +507,8 @@ internal sealed class PdfModelBuilder
             var pdfUa = new GenericModelObject("PDFUAIdentification");
             pdfUa.Set("part", snapshot.PdfUaIdentification.Part);
             pdfUa.Set("partPrefix", snapshot.PdfUaIdentification.PartPrefix);
+            pdfUa.Set("rev", snapshot.PdfUaIdentification.Rev);
+            pdfUa.Set("revPrefix", snapshot.PdfUaIdentification.RevPrefix);
             pdfUa.Set("amdPrefix", snapshot.PdfUaIdentification.AmdPrefix);
             pdfUa.Set("corrPrefix", snapshot.PdfUaIdentification.CorrPrefix);
             result.Add(pdfUa);
@@ -513,7 +643,13 @@ internal sealed class PdfModelBuilder
 
             if (string.Equals(subtype, "Form", StringComparison.Ordinal))
             {
-                return new ObjectDescriptor("PDXForm", "CosStream");
+                // Only create PDXForm for form XObjects actually referenced from content streams.
+                // veraPDF validates only used XObjects; unreferenced ones are ignored.
+                if (_referencedFormXObjects.Contains(stream))
+                {
+                    return new ObjectDescriptor("PDXForm", "CosStream");
+                }
+                return null; // Falls through to CosStream
             }
         }
 
@@ -553,7 +689,7 @@ internal sealed class PdfModelBuilder
             return DescribeStructureElement(dictionary);
         }
 
-        if (string.Equals(type, "Annot", StringComparison.Ordinal) || (subtype is not null && AnnotationSubtypes.Contains(subtype)))
+        if (string.Equals(type, "Annot", StringComparison.Ordinal) || (subtype is not null && type is null && AnnotationSubtypes.Contains(subtype)))
         {
             return subtype switch
             {
@@ -739,6 +875,33 @@ internal sealed class PdfModelBuilder
     {
         PopulateDictionaryObject(model, stream.Dictionary, descriptor, relationName, parentPdfObject);
 
+        // Set realLength on all CosStream-derived objects (actual byte count in file)
+        try
+        {
+            model.Set("realLength", stream.Contents.Length);
+        }
+        catch
+        {
+            // If we can't get the actual length, fall back to the declared Length
+            var declaredLength = stream.Dictionary.GetOptionalValue<PdfNumber>(PdfName.Length);
+            if (declaredLength is not null)
+            {
+                model.Set("realLength", (int)(double)declaredLength);
+            }
+        }
+
+        // stream/endstream keyword compliance (byte-level checks)
+        var (streamCRLF, endstreamEOL) = GetStreamKeywordCompliance(stream);
+        model.Set("streamKeywordCRLFCompliant", streamCRLF);
+        model.Set("endstreamKeywordEOLCompliant", endstreamEOL);
+
+        // PDContentStream needs inheritedResourceNames and undefinedResourceNames
+        if (string.Equals(model.ObjectType, "PDContentStream", StringComparison.Ordinal))
+        {
+            model.Set("inheritedResourceNames", "");
+            model.Set("undefinedResourceNames", "");
+        }
+
         if (string.Equals(model.ObjectType, "XMPPackage", StringComparison.Ordinal))
         {
             PopulateXmpPackage(model, stream);
@@ -756,8 +919,14 @@ internal sealed class PdfModelBuilder
             model.Set("containsAlternates", stream.Dictionary.ContainsKey(AlternatesName));
             model.Set("containsOPI", stream.Dictionary.ContainsKey(OPIName));
             model.Set("isMask", stream.Dictionary.GetOptionalValue<PdfBoolean>(PdfName.ImageMask)?.Value ?? false);
+            model.Set("Interpolate", stream.Dictionary.GetOptionalValue<PdfBoolean>(InterpolateName)?.Value ?? false);
             model.Set("internalRepresentation", GetInternalRepresentation(stream));
             model.Set("colorSpace", GetColorSpaceName(stream.Dictionary.Get(PdfName.ColorSpace)));
+
+            if (string.Equals(model.ObjectType, "JPEG2000", StringComparison.Ordinal))
+            {
+                PopulateJpeg2000(model, stream);
+            }
             return;
         }
 
@@ -766,8 +935,29 @@ internal sealed class PdfModelBuilder
             model.Set("containsOPI", stream.Dictionary.ContainsKey(OPIName));
             model.Set("containsPS", stream.Dictionary.ContainsKey(PSName));
             model.Set("containsRef", stream.Dictionary.ContainsKey(RefName));
+            model.Set("Subtype2", ConvertPdfObjectToString(stream.Dictionary.Get(new PdfName("Subtype2"))));
             model.Set("isUniqueSemanticParent", IsUniqueSemanticParent(stream));
         }
+    }
+
+    private static readonly System.Reflection.PropertyInfo? s_offsetProp =
+        typeof(PdfStreamContents).Assembly
+            .GetType("PdfLexer.PdfExistingStreamContents")
+            ?.GetProperty("Offset", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+
+    private (bool StreamKeywordCRLFCompliant, bool EndstreamKeywordEOLCompliant) GetStreamKeywordCompliance(PdfStream stream)
+    {
+        if (s_offsetProp is null)
+            return (true, true);
+
+        var contents = stream.Contents;
+        if (contents.GetType() != s_offsetProp.DeclaringType)
+            return (true, true); // In-memory stream, assume compliant
+
+        var offset = (long)s_offsetProp.GetValue(contents)!;
+        var declaredLength = stream.Dictionary.GetOptionalValue<PdfNumber>(PdfName.Length);
+        var length = declaredLength is not null ? (int)(double)declaredLength : contents.Length;
+        return _analysis.CheckStreamKeywordCompliance(offset, length);
     }
 
     private void PopulateDictionaryObject(GenericModelObject model, PdfDictionary dictionary, ObjectDescriptor descriptor, string? relationName, IPdfObject? parentPdfObject)
@@ -876,6 +1066,12 @@ internal sealed class PdfModelBuilder
             case "PDMediaClip":
                 PopulateMediaClip(model, dictionary);
                 break;
+            case "PDStructTreeRoot":
+                PopulateStructTreeRoot(model, dictionary);
+                break;
+            case "CosInfo":
+                PopulateCosInfo(model, dictionary);
+                break;
         }
     }
 
@@ -893,7 +1089,21 @@ internal sealed class PdfModelBuilder
 
     private void PopulatePrimitiveObject(GenericModelObject model, IPdfObject resolved)
     {
-        model.Set("value", ConvertPdfObjectToScalar(resolved));
+        var scalar = ConvertPdfObjectToScalar(resolved);
+        model.Set("value", scalar);
+
+        // CosName needs internalRepresentation for profile rules (e.g. length <= 127)
+        if (resolved is PdfName name)
+        {
+            model.Set("internalRepresentation", name.Value);
+        }
+
+        // CosReal needs realValue
+        if (resolved is PdfNumber number)
+        {
+            model.Set("realValue", (double)number);
+            model.Set("intValue", (double)number);
+        }
     }
 
     private void PopulateGenericDictionary(GenericModelObject model, PdfDictionary dictionary)
@@ -938,6 +1148,9 @@ internal sealed class PdfModelBuilder
         model.Set("containsStructTreeRoot", catalog.ContainsKey(StructTreeRootName));
         model.Set("containsMetadata", ContainsMetadataStream(catalog.GetOptionalValue<PdfStream>(PdfName.Metadata)));
 
+        var namesDict = catalog.GetOptionalValue<PdfDictionary>(PdfName.Names);
+        model.Set("containsAlternatePresentations", namesDict?.ContainsKey(new PdfName("AlternatePresentations")) ?? false);
+
         var markInfo = catalog.GetOptionalValue<PdfDictionary>(new PdfName("MarkInfo"));
         model.Set("MarkInfo", markInfo is not null);
         model.Set("Marked", markInfo?.GetOptionalValue<PdfBoolean>(MarkedName)?.Value ?? false);
@@ -949,17 +1162,31 @@ internal sealed class PdfModelBuilder
         model.Set("ViewerPreferences", viewerPreferences is not null ? viewerPreferences.ToString() : null);
 
         var idArray = _document.Trailer.GetOptionalValue<PdfArray>(PdfName.ID);
-        string? firstId = null;
-        string? lastId = null;
-        if (idArray is not null && idArray.Count > 0)
+        // Extract IDs from the physical trailer dictionaries (not the merged trailer).
+        // PdfLexer merges all trailers in the xref chain, but PDF/A rules require checking
+        // whether specific physical trailers contain /ID.
+        var (firstPageId, lastTrailerId) = PdfByteAnalysis.ExtractPhysicalTrailerIds(
+            _analysis.RawBytes, _analysis.IsLinearized);
+
+        // For linearized PDFs, the veraPDF model uses the first-page trailer as the document
+        // trailer (per model: "first page trailer for the linearized PDF or the last trailer
+        // in the document"). So lastID comes from the first-page trailer for linearized PDFs.
+        string? firstId;
+        string? lastId;
+        if (_analysis.IsLinearized)
         {
-            firstId = ConvertPdfObjectToString(idArray[0]);
-            lastId = ConvertPdfObjectToString(idArray[Math.Min(1, idArray.Count - 1)]);
+            firstId = firstPageId;
+            lastId = firstPageId; // first-page trailer IS the document trailer for linearized
+        }
+        else
+        {
+            firstId = null;
+            lastId = lastTrailerId;
         }
 
-        model.Set("firstPageID", firstId is not null);
+        model.Set("firstPageID", firstId);
         model.Set("firstPageIDValue", firstId);
-        model.Set("lastID", lastId is not null);
+        model.Set("lastID", lastId);
         model.Set("lastIDValue", lastId);
 
         // Emit CosLang for the document catalog Lang entry
@@ -1007,12 +1234,81 @@ internal sealed class PdfModelBuilder
         string.Equals(ConvertPdfObjectToString(metadata.Dictionary.Get(PdfName.TypeName)), "Metadata", StringComparison.Ordinal) &&
         string.Equals(ConvertPdfObjectToString(metadata.Dictionary.Get(PdfName.Subtype)), "XML", StringComparison.Ordinal);
 
+    private XmpMetadataSnapshot? GetXmpSnapshotFromCatalog()
+    {
+        if (!_document.Catalog.TryGetValue<PdfStream>(PdfName.Metadata, out var metadataStream, false))
+        {
+            return null;
+        }
+
+        return GetXmpSnapshot(metadataStream);
+    }
+
+    private static bool HasTransparency(PdfDictionary page)
+    {
+        // A page uses transparency if its Group dictionary has type Transparency
+        var group = page.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+        if (group is null)
+            return false;
+
+        var sValue = ConvertPdfObjectToString(group.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(group.Get(new PdfName("S")));
+        return string.Equals(sValue, "Transparency", StringComparison.Ordinal);
+    }
+
+    private static string? GetOutputColorSpace(PdfDictionary container)
+    {
+        // Look for output intents in the given dictionary (catalog or page)
+        if (!container.TryGetValue<PdfArray>(new PdfName("OutputIntents"), out var intents, false))
+            return null;
+
+        foreach (var intent in intents)
+        {
+            var dict = intent.Resolve() as PdfDictionary;
+            if (dict is null)
+                continue;
+
+            var subtype = ConvertPdfObjectToString(dict.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(dict.Get(new PdfName("S")));
+            if (string.Equals(subtype, "GTS_PDFA1", StringComparison.Ordinal) ||
+                string.Equals(subtype, "GTS_PDFX", StringComparison.Ordinal))
+            {
+                // Get the color space from the DestOutputProfile ICC profile or OutputConditionIdentifier
+                var destProfile = dict.GetOptionalValue<PdfStream>(DestOutputProfileName);
+                if (destProfile is not null)
+                {
+                    return "ICCBased";
+                }
+
+                var outputCondition = ConvertPdfObjectToString(dict.Get(new PdfName("OutputConditionIdentifier")));
+                if (!string.IsNullOrEmpty(outputCondition))
+                {
+                    return outputCondition;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private void PopulatePage(GenericModelObject model, PdfDictionary page)
     {
         model.Set("containsAA", page.ContainsKey(AAName));
         model.Set("containsMetadata", ContainsMetadataStream(page.GetOptionalValue<PdfStream>(PdfName.Metadata)));
         model.Set("containsStructParents", page.ContainsKey(new PdfName("StructParents")));
         model.Set("Tabs", ConvertPdfObjectToString(page.Get(TabsName)));
+        model.Set("containsPresSteps", page.ContainsKey(new PdfName("PresSteps")));
+
+        // Transparency-related properties for PDF/A output intent rules
+        var groupDict = page.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+        var hasGroupCS = groupDict is not null && groupDict.ContainsKey(new PdfName("CS"));
+        model.Set("containsGroupCS", hasGroupCS);
+        model.Set("containsTransparency", HasTransparency(page));
+
+        // Output color space from output intents
+        var documentOutputCS = GetOutputColorSpace(_document.Catalog);
+        var pageOutputCS = GetOutputColorSpace(page);
+        model.Set("gOutputCS", documentOutputCS);
+        model.Set("gDocumentOutputCS", documentOutputCS);
+        model.Set("outputColorSpace", pageOutputCS ?? documentOutputCS);
 
         var annots = page.GetOptionalValue<PdfArray>(AnnotsName);
         model.Set("containsAnnotations", annots is not null && annots.Count > 0);
@@ -1053,7 +1349,8 @@ internal sealed class PdfModelBuilder
         int? structParents,
         IReadOnlyList<string> ancestorTags,
         StructInfo? currentStructInfo,
-        string? currentEffectiveLang)
+        string? currentEffectiveLang,
+        bool actualTextFromAncestor = false)
     {
         var result = new List<IModelObject>();
         foreach (var node in nodes)
@@ -1074,19 +1371,22 @@ internal sealed class PdfModelBuilder
                 model.Set("isTaggedContent", effectiveStructInfo is not null);
                 model.Set("parentsTags", JoinTags(ancestorTags));
                 model.Set("parentStructureElementObjectKey", effectiveStructInfo?.ObjectKey);
-                model.Set("ActualText", ConvertPdfObjectToString(propertyList?.Get(ActualTextName)) ?? effectiveStructInfo?.ActualText);
+                var inlineActualText = ConvertPdfObjectToString(propertyList?.Get(ActualTextName));
+                model.Set("ActualText", inlineActualText ?? effectiveStructInfo?.ActualText);
                 model.Set("Alt", ConvertPdfObjectToString(propertyList?.Get(AltName)) ?? effectiveStructInfo?.Alt);
                 model.Set("E", ConvertPdfObjectToString(propertyList?.Get(new PdfName("E"))));
                 model.Set("Lang", ownLang);
                 model.Set("inheritedLang", ownLang is null ? (currentEffectiveLang ?? effectiveStructInfo?.Lang ?? effectiveStructInfo?.ParentLang) : null);
 
+                var childActualTextPresent = actualTextFromAncestor || inlineActualText is not null || effectiveStructInfo?.ActualText is not null;
                 var children = CreateContentObjects(
                     mcg.Children.OfType<IContentGroup<double>>().ToList(),
                     page,
                     structParents,
                     newTags,
                     effectiveStructInfo,
-                    childEffectiveLang);
+                    childEffectiveLang,
+                    childActualTextPresent);
                 if (children.Count > 0)
                 {
                     model.Link("children", children.ToArray());
@@ -1098,6 +1398,7 @@ internal sealed class PdfModelBuilder
 
             if (node is FormContent<double> form)
             {
+                _referencedFormXObjects.Add(form.Stream);
                 try
                 {
                     var nextStructParents = GetOptionalInt(form.Stream.Dictionary, new PdfName("StructParents")) ?? structParents;
@@ -1116,7 +1417,7 @@ internal sealed class PdfModelBuilder
                 continue;
             }
 
-            result.Add(CreateSimpleContentObject(node, ancestorTags, currentStructInfo, currentEffectiveLang));
+            result.Add(CreateSimpleContentObject(node, ancestorTags, currentStructInfo, currentEffectiveLang, actualTextFromAncestor));
         }
 
         return result;
@@ -1189,12 +1490,19 @@ internal sealed class PdfModelBuilder
         IContentGroup<double> node,
         IReadOnlyList<string> ancestorTags,
         StructInfo? currentStructInfo,
-        string? currentEffectiveLang = null)
+        string? currentEffectiveLang = null,
+        bool actualTextFromAncestor = false)
     {
         var model = new GenericModelObject("SESimpleContentItem");
         model.Set("isTaggedContent", currentStructInfo is not null);
         model.Set("parentsTags", JoinTags(ancestorTags));
         model.Set("contentType", node.Type.ToString());
+
+        // Whether the glyph is "real content" (not inside an Artifact)
+        var isArtifact = ancestorTags.Any(t => string.Equals(t, "Artifact", StringComparison.OrdinalIgnoreCase));
+        var isRealContent = !isArtifact;
+        var actualTextPresent = actualTextFromAncestor || currentStructInfo?.ActualText is not null;
+        var altPresent = currentStructInfo?.Alt is not null;
 
         if (node is TextContent<double> text)
         {
@@ -1203,7 +1511,7 @@ internal sealed class PdfModelBuilder
             textItem.Set("Lang", currentEffectiveLang ?? currentStructInfo?.Lang ?? currentStructInfo?.ParentLang);
             model.Link("textItem", textItem);
 
-            var glyphs = CreateGlyphObjects(text);
+            var glyphs = CreateGlyphObjects(text, isRealContent, actualTextPresent, altPresent);
             if (glyphs.Count > 0)
             {
                 model.Link("glyphs", glyphs.ToArray());
@@ -1213,13 +1521,14 @@ internal sealed class PdfModelBuilder
         return model;
     }
 
-    private List<IModelObject> CreateGlyphObjects(TextContent<double> text)
+    private List<IModelObject> CreateGlyphObjects(TextContent<double> text, bool isRealContent, bool actualTextPresent, bool altPresent)
     {
         var glyphs = new List<IModelObject>();
         foreach (var segment in text.Segments)
         {
             var font = segment.GraphicsState.FontObject?.Resolve() as PdfDictionary;
             var validationFont = font is null ? null : GetValidationFontDictionary(font);
+            var hasToUnicodeCMap = font is not null && font.ContainsKey("ToUnicode");
             foreach (var glyphOrShift in segment.Glyphs)
             {
                 if (glyphOrShift.Glyph is not { } glyph)
@@ -1239,7 +1548,18 @@ internal sealed class PdfModelBuilder
                 model.Set("isGlyphPresent", GetGlyphPresence(font, glyph));
                 model.Set("widthFromDictionary", glyph.w0 == 0 && glyph.Undefined ? null : glyph.w0 * 1000d);
                 model.Set("widthFromFontProgram", GetWidthFromFontProgram(font, glyph));
-                model.Set("toUnicode", GetGlyphUnicode(glyph));
+                var unicode = GetGlyphUnicode(glyph);
+                // veraPDF's standard AGL does not include TeX-specific glyph names.
+                // Without a ToUnicode CMap, these names must yield null toUnicode.
+                if (!hasToUnicodeCMap && glyph.Name is not null && TexSpecificGlyphNames.Contains(glyph.Name))
+                {
+                    unicode = null;
+                }
+                model.Set("toUnicode", unicode);
+                model.Set("unicodePUA", IsUnicodePUA(unicode));
+                model.Set("isRealContent", isRealContent);
+                model.Set("actualTextPresent", actualTextPresent);
+                model.Set("altPresent", altPresent);
                 glyphs.Add(model);
             }
         }
@@ -1247,11 +1567,50 @@ internal sealed class PdfModelBuilder
         return glyphs;
     }
 
+    private static bool IsUnicodePUA(string? unicode)
+    {
+        if (unicode is null) return false;
+        foreach (var ch in unicode.EnumerateRunes())
+        {
+            var value = ch.Value;
+            if ((value >= 0xE000 && value <= 0xF8FF) ||
+                (value >= 0xF0000 && value <= 0xFFFFD) ||
+                (value >= 0x100000 && value <= 0x10FFFD))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void PopulateAnnotation(GenericModelObject model, PdfDictionary annotation, IPdfObject? parentPdfObject)
     {
         model.Set("containsAA", annotation.ContainsKey(AAName));
+        model.Set("containsA", annotation.ContainsKey(new PdfName("A")));
         model.Set("isOutsideCropBox", IsOutsideCropBox(annotation, parentPdfObject));
         model.Set("Contents", ConvertPdfObjectToString(annotation.Get(PdfName.Contents)));
+
+        // AP: ampersand-separated list of all keys in the appearance dictionary
+        var apObj = annotation.Get(new PdfName("AP"));
+        var apDict = apObj?.Resolve() as PdfDictionary;
+        model.Set("AP", apDict is not null ? string.Join("&", apDict.Keys.Select(k => k.Value)) : null);
+
+        // width and height from Rect
+        var rect = annotation.GetOptionalValue<PdfArray>(RectName);
+        if (rect is not null && rect.Count >= 4)
+        {
+            var x1 = GetNumberValue(rect[0]) ?? 0.0;
+            var y1 = GetNumberValue(rect[1]) ?? 0.0;
+            var x2 = GetNumberValue(rect[2]) ?? 0.0;
+            var y2 = GetNumberValue(rect[3]) ?? 0.0;
+            model.Set("width", Math.Abs(x2 - x1));
+            model.Set("height", Math.Abs(y2 - y1));
+        }
+        else
+        {
+            model.Set("width", 0.0);
+            model.Set("height", 0.0);
+        }
 
         // For Widget annotations, surface TU (tooltip) from the linked form field
         if (string.Equals(model.ObjectType, "PDWidgetAnnot", StringComparison.Ordinal))
@@ -1288,6 +1647,58 @@ internal sealed class PdfModelBuilder
             }
         }
         model.Set("containsLang", containsLang);
+
+        // Subtype from the annotation dictionary
+        var subtype = ConvertPdfObjectToString(annotation.Get(PdfName.Subtype));
+        model.Set("Subtype", subtype);
+
+        // FT: field type for widget annotations (walk parent chain)
+        if (string.Equals(subtype, "Widget", StringComparison.Ordinal) || string.Equals(model.ObjectType, "PDWidgetAnnot", StringComparison.Ordinal))
+        {
+            var annotFt = ConvertPdfObjectToString(annotation.Get(FTName));
+            if (annotFt is null)
+            {
+                var ftParent = annotation.GetOptionalValue<PdfDictionary>(PName);
+                while (ftParent is not null && annotFt is null)
+                {
+                    annotFt = ConvertPdfObjectToString(ftParent.Get(FTName));
+                    ftParent = ftParent.GetOptionalValue<PdfDictionary>(PName);
+                }
+            }
+            model.Set("FT", annotFt);
+        }
+
+        // N_type: type of normal appearance (N key in AP dictionary)
+        string? nType = null;
+        bool containsAppearances = false;
+        if (apDict is not null)
+        {
+            var nObj = apDict.Get(new PdfName("N"));
+            var nResolved = nObj?.Resolve();
+            if (nResolved is PdfStream)
+            {
+                nType = "Stream";
+                containsAppearances = true;
+            }
+            else if (nResolved is PdfDictionary nDict)
+            {
+                nType = "Dict";
+                containsAppearances = nDict.Count > 0;
+            }
+        }
+        model.Set("N_type", nType);
+        model.Set("containsAppearances", containsAppearances);
+
+        // C and IC arrays for color rules
+        model.Set("containsC", annotation.ContainsKey(new PdfName("C")));
+        model.Set("containsIC", annotation.ContainsKey(new PdfName("IC")));
+
+        // F (flags) for annotation flag rules
+        var flagsObj = annotation.Get(new PdfName("F"));
+        model.Set("F", flagsObj is not null ? ConvertPdfObjectToString(flagsObj) : null);
+
+        // gOutputCS: document-level output color space
+        model.Set("gOutputCS", GetOutputColorSpace(_document.Catalog));
     }
 
     private bool IsOutsideCropBox(PdfDictionary annotation, IPdfObject? parentPdfObject)
@@ -1357,7 +1768,23 @@ internal sealed class PdfModelBuilder
         model.Set("containsTR", extGState.ContainsKey(TRName));
         model.Set("containsTR2", extGState.ContainsKey(TR2Name));
         model.Set("containsHTP", extGState.ContainsKey(HTPName));
+        model.Set("containsHTO", extGState.ContainsKey(HTOName));
         model.Set("TR2NameValue", ConvertPdfObjectToString(extGState.Get(TR2Name)));
+
+        // SMask
+        model.Set("containsSMask", extGState.ContainsKey(SMaskName));
+        var smaskVal = extGState.Get(SMaskName)?.Resolve();
+        model.Set("SMaskNameValue", smaskVal is PdfName smaskName ? smaskName.Value : (smaskVal is not null ? "Custom" : null));
+
+        // BM (blend mode)
+        model.Set("containsBM", extGState.ContainsKey(BMName));
+        model.Set("BMNameValue", ConvertPdfObjectToString(extGState.Get(BMName)));
+
+        // ca and CA (fill and stroke alpha)
+        var caObj = extGState.Get(new PdfName("ca"));
+        model.Set("ca", caObj is not null ? GetNumberValue(caObj) : null);
+        var caUpperObj = extGState.Get(new PdfName("CA"));
+        model.Set("CA", caUpperObj is not null ? GetNumberValue(caUpperObj) : null);
     }
 
     private void ApplyFontRenderingModes()
@@ -1398,6 +1825,14 @@ internal sealed class PdfModelBuilder
         model.Set("Subtype", subtype);
         model.Set("fontName", StripSubsetPrefix(baseFont));
         model.Set("isStandard", baseFont is not null && Standard14Fonts.Contains(StripSubsetPrefix(baseFont)));
+
+        // FirstChar, LastChar and Widths array size for PDSimpleFont validation rules
+        var firstChar = font.GetOptionalValue<PdfNumber>(PdfName.FirstChar);
+        var lastChar = font.GetOptionalValue<PdfNumber>(PdfName.LastChar);
+        model.Set("FirstChar", firstChar is not null ? (int)(double)firstChar : null);
+        model.Set("LastChar", lastChar is not null ? (int)(double)lastChar : null);
+        var widths = font.GetOptionalValue<PdfArray>(PdfName.Widths);
+        model.Set("Widths_size", widths?.Count);
         // renderingMode is per-usage in veraPDF; we set null since PDFont is per-dictionary.
         // null means "not restricted to invisible" — falls through to containsFontFile check.
         model.Set("renderingMode", (object?)null);
@@ -1536,6 +1971,8 @@ internal sealed class PdfModelBuilder
         program.Set("Encoding", GetEncodingName(font.Get(PdfName.Encoding)));
         program.Set("nrCmaps", info.NumberOfCmaps);
         program.Set("cmap30Present", info.Cmap30Present);
+        program.Set("cmap31Present", info.Cmap31Present);
+        program.Set("cmap10Present", info.Cmap10Present);
         _trueTypeFontProgramObjects[font] = program;
         return program;
     }
@@ -1594,7 +2031,9 @@ internal sealed class PdfModelBuilder
                 widthByCharCode,
                 presenceByCharCode,
                 cmaps.Count,
-                cmaps.Any(static x => x.PlatformId == 3 && x.EncodingId == 0));
+                cmaps.Any(static x => x.PlatformId == 3 && x.EncodingId == 0),
+                cmaps.Any(static x => x.PlatformId == 3 && x.EncodingId == 1),
+                cmaps.Any(static x => x.PlatformId == 1 && x.EncodingId == 0));
             _fontProgramCache[font] = info;
             return info;
         }
@@ -1935,11 +2374,227 @@ internal sealed class PdfModelBuilder
         model.Set("P", GetOptionalInt(encryption, new PdfName("P")));
     }
 
-    private static void PopulateFileSpecification(GenericModelObject model, PdfDictionary fileSpec)
+    private void PopulateStructTreeRoot(GenericModelObject model, PdfDictionary root)
+    {
+        var childTypes = GetChildStandardTypes(root.Get(KidsName));
+        model.Set("kidsStandardTypes", string.Join('&', childTypes));
+        model.Set("hasContentItems", HasContentItems(root));
+
+        // firstChildStandardTypeNamespaceURL: the namespace URI of the first child struct element
+        string? firstChildNsUrl = null;
+        foreach (var child in EnumerateKids(root.Get(KidsName)))
+        {
+            if (child.Resolve() is PdfDictionary dict && (dict.ContainsKey(new PdfName("S")) || string.Equals(ConvertPdfObjectToString(dict.Get(PdfName.TypeName)), "StructElem", StringComparison.Ordinal)))
+            {
+                var ns = dict.GetOptionalValue<PdfDictionary>(new PdfName("NS"));
+                firstChildNsUrl = ns is not null ? ConvertPdfObjectToString(ns.Get(new PdfName("NS"))) : null;
+                // If no explicit NS, check if it's a standard PDF 1.x type (no namespace)
+                break;
+            }
+        }
+        model.Set("firstChildStandardTypeNamespaceURL", firstChildNsUrl);
+    }
+
+    private void PopulateCosInfo(GenericModelObject model, PdfDictionary info)
+    {
+        // Number of keys in the Info dictionary
+        model.Set("size", info.Keys.Count());
+
+        // Info dictionary string values
+        model.Set("Title", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Title")))));
+        model.Set("Author", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Author")))));
+        model.Set("Subject", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Subject")))));
+        model.Set("Keywords", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Keywords")))));
+        model.Set("Creator", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Creator")))));
+        model.Set("Producer", TrimTrailingNull(ConvertPdfObjectToString(info.Get(new PdfName("Producer")))));
+        model.Set("CreationDate", ConvertPdfObjectToString(info.Get(new PdfName("CreationDate"))));
+        model.Set("ModDate", ConvertPdfObjectToString(info.Get(new PdfName("ModDate"))));
+
+        // XMP counterparts from document metadata
+        var xmp = GetXmpSnapshotFromCatalog();
+        model.Set("XMPTitle", xmp?.DcTitle);
+        model.Set("XMPCreator", xmp?.XMPCreator);
+        model.Set("XMPCreatorSize", xmp?.XMPCreatorSize);
+        model.Set("XMPDescription", xmp?.XMPDescription);
+        model.Set("XMPProducer", xmp?.XMPProducer);
+        model.Set("XMPCreatorTool", xmp?.XMPCreatorTool);
+        model.Set("XMPKeywords", xmp?.XMPKeywords);
+        model.Set("XMPCreateDate", xmp?.XMPCreateDate);
+        model.Set("XMPModifyDate", xmp?.XMPModifyDate);
+
+        // Date comparison
+        model.Set("doCreationDatesMatch", CompareDates(ConvertPdfObjectToString(info.Get(new PdfName("CreationDate"))), xmp?.XMPCreateDate));
+        model.Set("doModDatesMatch", CompareDates(ConvertPdfObjectToString(info.Get(new PdfName("ModDate"))), xmp?.XMPModifyDate));
+    }
+
+    private static string? TrimTrailingNull(string? value)
+    {
+        return value?.TrimEnd('\0');
+    }
+
+    private static bool? CompareDates(string? pdfDate, string? xmpDate)
+    {
+        if (pdfDate is null && xmpDate is null) return null;
+        if (pdfDate is null || xmpDate is null) return null;
+
+        // Normalize PDF date format D:YYYYMMDDHHmmSSOHH'mm' to comparable form
+        var normalizedPdf = NormalizePdfDate(pdfDate);
+        var normalizedXmp = NormalizeXmpDate(xmpDate);
+
+        if (normalizedPdf is null || normalizedXmp is null) return null;
+
+        return string.Equals(normalizedPdf, normalizedXmp, StringComparison.Ordinal);
+    }
+
+    private static string NormalizeTz(string tz)
+    {
+        // Treat +00:00 and -00:00 as Z
+        if (tz is "+00:00" or "-00:00") return "Z";
+        return tz;
+    }
+
+    private static string? NormalizePdfDate(string pdfDate)
+    {
+        // PDF date format: D:YYYYMMDDHHmmSSOHH'mm'
+        var d = pdfDate.AsSpan();
+        if (d.StartsWith("D:")) d = d[2..];
+        if (d.Length < 4) return null;
+
+        // Extract components with defaults
+        var year = d.Length >= 4 ? d[..4].ToString() : null;
+        var month = d.Length >= 6 ? d[4..6].ToString() : "01";
+        var day = d.Length >= 8 ? d[6..8].ToString() : "01";
+        var hour = d.Length >= 10 ? d[8..10].ToString() : "00";
+        var minute = d.Length >= 12 ? d[10..12].ToString() : "00";
+        var second = d.Length >= 14 ? d[12..14].ToString() : "00";
+
+        if (year is null) return null;
+
+        // Timezone: character at position 14 (+, -, Z, or none)
+        var tz = "Z";
+        if (d.Length > 14)
+        {
+            var tzChar = d[14];
+            if (tzChar == 'Z') tz = "Z";
+            else if (tzChar == '+' || tzChar == '-')
+            {
+                var tzHour = d.Length >= 17 ? d[15..17].ToString() : "00";
+                // Skip the apostrophe at 17 if present
+                var tzMin = d.Length >= 20 ? d[18..20].ToString() : "00";
+                tz = $"{tzChar}{tzHour}:{tzMin}";
+            }
+        }
+
+        return $"{year}-{month}-{day}T{hour}:{minute}:{second}{NormalizeTz(tz)}";
+    }
+
+    private static string? NormalizeXmpDate(string xmpDate)
+    {
+        // XMP date is already in ISO 8601: YYYY-MM-DDTHH:mm:ss+HH:mm or YYYY-MM-DDTHH:mm:ssZ
+        // Normalize to full precision
+        if (xmpDate.Length < 4) return null;
+
+        var parts = xmpDate.Split('T');
+        var datePart = parts[0];
+        var dateComponents = datePart.Split('-');
+
+        var year = dateComponents.Length >= 1 ? dateComponents[0] : null;
+        var month = dateComponents.Length >= 2 ? dateComponents[1] : "01";
+        var day = dateComponents.Length >= 3 ? dateComponents[2] : "01";
+
+        if (year is null) return null;
+
+        var hour = "00";
+        var minute = "00";
+        var second = "00";
+        var tz = "Z";
+
+        if (parts.Length > 1)
+        {
+            var timePart = parts[1];
+            // Extract timezone
+            var tzIdx = timePart.IndexOfAny(['+', '-', 'Z']);
+            if (tzIdx >= 0)
+            {
+                tz = timePart[tzIdx..];
+                if (tz == "Z") tz = "Z";
+                timePart = timePart[..tzIdx];
+            }
+
+            var timeComponents = timePart.Split(':');
+            hour = timeComponents.Length >= 1 ? timeComponents[0] : "00";
+            minute = timeComponents.Length >= 2 ? timeComponents[1] : "00";
+            second = timeComponents.Length >= 3 ? timeComponents[2].Split('.')[0] : "00";
+        }
+
+        return $"{year}-{month}-{day}T{hour}:{minute}:{second}{NormalizeTz(tz)}";
+    }
+
+    private void PopulateFileSpecification(GenericModelObject model, PdfDictionary fileSpec)
     {
         model.Set("F", ConvertPdfObjectToString(fileSpec.Get(PdfName.F)));
         model.Set("UF", ConvertPdfObjectToString(fileSpec.Get(UFName)));
         model.Set("containsEF", fileSpec.ContainsKey(EFName));
+        model.Set("containsDesc", fileSpec.ContainsKey(new PdfName("Desc")));
+        model.Set("AFRelationship", ConvertPdfObjectToString(fileSpec.Get(new PdfName("AFRelationship"))));
+        model.Set("isAssociatedFile", IsAssociatedFile(fileSpec));
+    }
+
+    private bool IsAssociatedFile(PdfDictionary fileSpec)
+    {
+        EnsureAfReferences();
+        return _afReferencedFileSpecs!.Contains(fileSpec);
+    }
+
+    private void EnsureAfReferences()
+    {
+        if (_afReferencedFileSpecs is not null) return;
+        _afReferencedFileSpecs = new HashSet<PdfDictionary>(ReferenceEqualityComparer<PdfDictionary>.Instance);
+        var visited = new HashSet<PdfDictionary>(ReferenceEqualityComparer<PdfDictionary>.Instance);
+
+        // Collect AF refs from catalog, pages, annotations, and resource XObjects
+        CollectAfRefs(_document.Catalog);
+        foreach (var page in _document.Pages)
+        {
+            CollectAfRefs(page.NativeObject);
+            ScanResourceXObjects(page.NativeObject, visited);
+            if (page.NativeObject.TryGetValue<PdfArray>(AnnotsName, out var annots, false))
+            {
+                foreach (var annot in annots)
+                {
+                    if (annot.Resolve() is PdfDictionary annotDict)
+                        CollectAfRefs(annotDict);
+                }
+            }
+        }
+    }
+
+    private void ScanResourceXObjects(PdfDictionary container, HashSet<PdfDictionary> visited)
+    {
+        if (!visited.Add(container)) return;
+        if (!container.TryGetValue<PdfDictionary>(new PdfName("Resources"), out var resources, false)) return;
+        if (!resources.TryGetValue<PdfDictionary>(new PdfName("XObject"), out var xobjects, false)) return;
+
+        foreach (var key in xobjects.Keys)
+        {
+            var val = xobjects.Get(key)?.Resolve();
+            if (val is PdfStream stream)
+            {
+                CollectAfRefs(stream.Dictionary);
+                // Recursively scan form XObject resources
+                ScanResourceXObjects(stream.Dictionary, visited);
+            }
+        }
+    }
+
+    private void CollectAfRefs(PdfDictionary dict)
+    {
+        if (!dict.TryGetValue<PdfArray>(AFName, out var af, false)) return;
+        foreach (var item in af)
+        {
+            if (item.Resolve() is PdfDictionary fsDict)
+                _afReferencedFileSpecs!.Add(fsDict);
+        }
     }
 
     private void PopulateFormField(GenericModelObject model, PdfDictionary field)
@@ -1957,6 +2612,7 @@ internal sealed class PdfModelBuilder
 
         model.Set("FT", ft);
         model.Set("TU", ConvertPdfObjectToString(field.Get(TUName)));
+        model.Set("containsAA", field.ContainsKey(AAName));
 
         // containsLang: check the struct element's /Lang via StructParent (matching Java veraPDF)
         var containsLang = false;
@@ -2062,6 +2718,164 @@ internal sealed class PdfModelBuilder
         }
     }
 
+    private void PopulateJpeg2000(GenericModelObject model, PdfStream stream)
+    {
+        model.Set("hasColorSpace", stream.Dictionary.ContainsKey(PdfName.ColorSpace));
+
+        try
+        {
+            using var encoded = stream.Contents.GetEncodedData();
+            using var ms = new MemoryStream();
+            encoded.CopyTo(ms);
+            var data = ms.ToArray();
+
+            ParseJp2Boxes(model, data);
+        }
+        catch
+        {
+            // If we can't read the stream, leave defaults
+        }
+    }
+
+    private static void ParseJp2Boxes(GenericModelObject model, byte[] data)
+    {
+        int nrColorSpaceSpecs = 0;
+        int nrColorSpacesWithApproxField = 0;
+        // colr data from the first box with APPROX==1
+        int? colrMethod = null;
+        int? colrEnumCS = null;
+        // colr data from the very first box (regardless of APPROX)
+        int? firstColrMethod = null;
+        int? firstColrEnumCS = null;
+        int nrColorChannels = 0;
+        int bitDepth = 0;
+        bool bpccBoxPresent = false;
+
+        // Parse top-level boxes to find jp2h (JP2 Header superbox)
+        int offset = 0;
+        while (offset + 8 <= data.Length)
+        {
+            var (boxLen, boxType) = ReadBox(data, offset);
+            if (boxLen < 8 || offset + boxLen > data.Length)
+                break;
+
+            if (boxType == "jp2h")
+            {
+                // Parse sub-boxes inside jp2h
+                int inner = offset + 8;
+                int innerEnd = offset + (int)boxLen;
+                while (inner + 8 <= innerEnd)
+                {
+                    var (subLen, subType) = ReadBox(data, inner);
+                    if (subLen < 8 || inner + subLen > innerEnd)
+                        break;
+
+                    int subData = inner + 8;
+
+                    if (subType == "ihdr" && subLen >= 22)
+                    {
+                        // ihdr: 4 bytes height, 4 bytes width, 2 bytes numComponents, 1 byte BPC
+                        nrColorChannels = ReadUInt16BE(data, subData + 8);
+                        var bpc = data[subData + 10];
+                        // Bit 7 = signed flag; bits 0-6 = depth minus 1
+                        bitDepth = (bpc & 0x7F) + 1;
+                    }
+                    else if (subType == "colr" && subLen >= 11)
+                    {
+                        nrColorSpaceSpecs++;
+                        int meth = data[subData];
+                        int approx = data[subData + 2];
+                        int? enumCS = (meth == 1 && subLen >= 15) ? ReadInt32BE(data, subData + 3) : null;
+
+                        // Track the very first colr box
+                        firstColrMethod ??= meth;
+                        firstColrEnumCS ??= enumCS;
+
+                        // Track the first colr box with APPROX == 1
+                        if (approx == 1)
+                        {
+                            nrColorSpacesWithApproxField++;
+                            colrMethod ??= meth;
+                            colrEnumCS ??= enumCS;
+                        }
+                    }
+                    else if (subType == "bpcc")
+                    {
+                        bpccBoxPresent = true;
+                    }
+
+                    inner += (int)subLen;
+                }
+                break; // Only process first jp2h
+            }
+
+            offset += (int)boxLen;
+        }
+
+        // Determine effective colrMethod/colrEnumCS using veraPDF priority logic:
+        // 1. If any colr box has APPROX==1, use that box's values
+        // 2. Else if exactly 1 colr box total, use the first (only) box's values
+        int effectiveColrMethod;
+        int? effectiveColrEnumCS;
+        if (nrColorSpacesWithApproxField > 0)
+        {
+            effectiveColrMethod = colrMethod!.Value;
+            effectiveColrEnumCS = colrEnumCS;
+        }
+        else if (nrColorSpaceSpecs == 1)
+        {
+            effectiveColrMethod = firstColrMethod ?? 0;
+            effectiveColrEnumCS = firstColrEnumCS;
+        }
+        else
+        {
+            effectiveColrMethod = 0;
+            effectiveColrEnumCS = null;
+        }
+
+        model.Set("nrColorChannels", nrColorChannels);
+        model.Set("nrColorSpaceSpecs", nrColorSpaceSpecs);
+        model.Set("nrColorSpacesWithApproxField", nrColorSpacesWithApproxField);
+        model.Set("colrMethod", effectiveColrMethod);
+        if (effectiveColrEnumCS.HasValue)
+            model.Set("colrEnumCS", effectiveColrEnumCS.Value);
+        model.Set("bitDepth", bitDepth);
+        model.Set("bpccBoxPresent", bpccBoxPresent);
+    }
+
+    private static (long Length, string Type) ReadBox(byte[] data, int offset)
+    {
+        long len = ReadUInt32BE(data, offset);
+        string type = Encoding.ASCII.GetString(data, offset + 4, 4);
+        if (len == 1 && offset + 16 <= data.Length)
+        {
+            // Extended length (8 bytes)
+            len = ((long)ReadUInt32BE(data, offset + 8) << 32) | ReadUInt32BE(data, offset + 12);
+        }
+        else if (len == 0)
+        {
+            // Box extends to end of data
+            len = data.Length - offset;
+        }
+        return (len, type);
+    }
+
+    private static uint ReadUInt32BE(byte[] data, int offset)
+    {
+        return ((uint)data[offset] << 24) | ((uint)data[offset + 1] << 16) |
+               ((uint)data[offset + 2] << 8) | data[offset + 3];
+    }
+
+    private static ushort ReadUInt16BE(byte[] data, int offset)
+    {
+        return (ushort)((data[offset] << 8) | data[offset + 1]);
+    }
+
+    private static int ReadInt32BE(byte[] data, int offset)
+    {
+        return (int)ReadUInt32BE(data, offset);
+    }
+
     private static string ReadAscii(byte[] bytes, int start, int length)
     {
         if (start + length > bytes.Length)
@@ -2093,7 +2907,7 @@ internal sealed class PdfModelBuilder
         {
             var bytes = stream.Contents.GetDecodedData();
             var actualEncoding = DetectEncoding(bytes);
-            var text = actualEncoding.GetString(bytes);
+            var text = actualEncoding.GetString(bytes).TrimStart('\uFEFF');
             var packetMatch = Regex.Match(text, @"<\?xpacket\b(?<attrs>[^?]*)\?>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
             var packetBytes = TryReadAttribute(packetMatch, BytesName.Value);
             var packetEncoding = TryReadAttribute(packetMatch, "encoding");
@@ -2115,7 +2929,10 @@ internal sealed class PdfModelBuilder
             var pdfUa = document is null ? null : ReadPdfUaIdentification(document);
             var pdfa = document is null ? null : ReadPdfAIdentification(document);
             var langAlts = document is null ? Array.Empty<XmpLangAltEntry>() : ReadXmpLangAlts(document);
-            snapshot = new XmpMetadataSnapshot(valid, actualEncoding.WebName.ToUpperInvariant(), packetBytes, packetEncoding, dcTitle, pdfUa, pdfa, langAlts);
+            var xmpInfo = document is null ? default : ReadXmpInfoProperties(document);
+            snapshot = new XmpMetadataSnapshot(valid, actualEncoding.WebName.ToUpperInvariant(), packetBytes, packetEncoding, dcTitle, pdfUa, pdfa, langAlts,
+                xmpInfo.CreateDate, xmpInfo.ModifyDate, xmpInfo.Creator, xmpInfo.CreatorSize,
+                xmpInfo.Description, xmpInfo.Producer, xmpInfo.CreatorTool, xmpInfo.Keywords);
         }
         catch
         {
@@ -2128,11 +2945,65 @@ internal sealed class PdfModelBuilder
 
     private static Encoding DetectEncoding(byte[] bytes)
     {
+        // UTF-8 BOM
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
         {
             return Encoding.UTF8;
         }
 
+        // UTF-32 LE BOM (must check before UTF-16 LE since FF FE is a prefix)
+        if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
+        {
+            return Encoding.UTF32; // UTF-32 LE
+        }
+
+        // UTF-32 BE BOM
+        if (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF)
+        {
+            return new UTF32Encoding(bigEndian: true, byteOrderMark: true);
+        }
+
+        // UTF-16 LE BOM
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+        {
+            return Encoding.Unicode; // UTF-16 LE
+        }
+
+        // UTF-16 BE BOM
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+        {
+            return Encoding.BigEndianUnicode; // UTF-16 BE
+        }
+
+        // No BOM — detect encoding from byte pattern of '<' (0x3C)
+        if (bytes.Length >= 4)
+        {
+            // UTF-32 BE: 00 00 00 3C
+            if (bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x3C)
+            {
+                return new UTF32Encoding(bigEndian: true, byteOrderMark: false);
+            }
+
+            // UTF-32 LE: 3C 00 00 00
+            if (bytes[0] == 0x3C && bytes[1] == 0x00 && bytes[2] == 0x00 && bytes[3] == 0x00)
+            {
+                return Encoding.UTF32; // UTF-32 LE
+            }
+
+            // UTF-16 BE: 00 3C 00 3F
+            if (bytes[0] == 0x00 && bytes[1] == 0x3C && bytes[2] == 0x00 && bytes[3] == 0x3F)
+            {
+                return Encoding.BigEndianUnicode; // UTF-16 BE
+            }
+
+            // UTF-16 LE: 3C 00 3F 00
+            if (bytes[0] == 0x3C && bytes[1] == 0x00 && bytes[2] == 0x3F && bytes[3] == 0x00)
+            {
+                return Encoding.Unicode; // UTF-16 LE
+            }
+        }
+
+        // Try parsing encoding attribute from ASCII-compatible prefix
         var prefix = Encoding.ASCII.GetString(bytes, 0, Math.Min(bytes.Length, 256));
         var xmlDecl = Regex.Match(prefix, @"<\?xml[^>]*encoding\s*=\s*['""](?<enc>[^'""]+)['""]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (xmlDecl.Success)
@@ -2175,6 +3046,61 @@ internal sealed class PdfModelBuilder
                 .FirstOrDefault(static x => !string.IsNullOrWhiteSpace(x));
     }
 
+    private static (string? CreateDate, string? ModifyDate, string? Creator, int CreatorSize, string? Description, string? Producer, string? CreatorTool, string? Keywords) ReadXmpInfoProperties(XDocument document)
+    {
+        XNamespace dc = "http://purl.org/dc/elements/1.1/";
+        XNamespace xmp = "http://ns.adobe.com/xap/1.0/";
+        XNamespace pdf = "http://ns.adobe.com/pdf/1.3/";
+        XNamespace rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+        var createDate = ReadSimpleXmpValue(document, xmp + "CreateDate");
+        var modifyDate = ReadSimpleXmpValue(document, xmp + "ModifyDate");
+        var creatorTool = ReadSimpleXmpValue(document, xmp + "CreatorTool");
+        var producer = ReadSimpleXmpValue(document, pdf + "Producer");
+        var keywords = ReadSimpleXmpValue(document, pdf + "Keywords");
+
+        // dc:description is a LangAlt — same structure as dc:title
+        var description = document.Descendants(dc + "description")
+            .Descendants(rdf + "li")
+            .Select(static x => x.Value)
+            .FirstOrDefault(static x => !string.IsNullOrWhiteSpace(x))
+            ?? document.Descendants(dc + "description")
+                .Select(static x => x.Value)
+                .FirstOrDefault(static x => !string.IsNullOrWhiteSpace(x));
+
+        // dc:creator is an ordered array (rdf:Seq)
+        var creatorItems = document.Descendants(dc + "creator")
+            .Descendants(rdf + "li")
+            .Select(static x => x.Value)
+            .ToList();
+        var creator = creatorItems.Count > 0 ? string.Join(", ", creatorItems) : null;
+        var creatorSize = creatorItems.Count;
+
+        return (createDate, modifyDate, creator, creatorSize, description, producer, creatorTool, keywords);
+    }
+
+    private static string? ReadSimpleXmpValue(XDocument document, XName name)
+    {
+        // Try as element first, then as attribute on rdf:Description
+        var element = document.Descendants(name).FirstOrDefault();
+        if (element is not null)
+        {
+            return element.Value;
+        }
+
+        // Check attributes on rdf:Description elements
+        foreach (var desc in document.Descendants(XNamespace.Get("http://www.w3.org/1999/02/22-rdf-syntax-ns#") + "Description"))
+        {
+            var attr = desc.Attribute(name);
+            if (attr is not null)
+            {
+                return attr.Value;
+            }
+        }
+
+        return null;
+    }
+
     private static PdfUaIdentificationSnapshot? ReadPdfUaIdentification(XDocument document)
     {
         const string namespaceUri = "http://www.aiim.org/pdfua/ns/id/";
@@ -2187,10 +3113,12 @@ internal sealed class PdfModelBuilder
         XNamespace ns = namespaceUri;
 
         return new PdfUaIdentificationSnapshot(
-            ParseInt(schema.Element(ns + "part")?.Value),
-            GetPrefix(schema.Element(ns + "part")),
-            GetPrefix(schema.Element(ns + "amd")),
-            GetPrefix(schema.Element(ns + "corr")));
+            ParseInt(ReadSchemaValue(schema, ns + "part")),
+            GetSchemaPrefix(schema, ns + "part"),
+            ReadSchemaValue(schema, ns + "rev"),
+            GetSchemaPrefix(schema, ns + "rev"),
+            GetSchemaPrefix(schema, ns + "amd"),
+            GetSchemaPrefix(schema, ns + "corr"));
     }
 
     private static PdfAIdentificationSnapshot? ReadPdfAIdentification(XDocument document)
@@ -2205,19 +3133,48 @@ internal sealed class PdfModelBuilder
         XNamespace ns = namespaceUri;
 
         return new PdfAIdentificationSnapshot(
-            ParseInt(schema.Element(ns + "part")?.Value),
-            GetPrefix(schema.Element(ns + "part")),
-            schema.Element(ns + "conformance")?.Value,
-            GetPrefix(schema.Element(ns + "conformance")),
-            schema.Element(ns + "rev")?.Value,
-            GetPrefix(schema.Element(ns + "rev")),
-            GetPrefix(schema.Element(ns + "amd")),
-            GetPrefix(schema.Element(ns + "corr")));
+            ParseInt(ReadSchemaValue(schema, ns + "part")),
+            GetSchemaPrefix(schema, ns + "part"),
+            ReadSchemaValue(schema, ns + "conformance"),
+            GetSchemaPrefix(schema, ns + "conformance"),
+            ReadSchemaValue(schema, ns + "rev"),
+            GetSchemaPrefix(schema, ns + "rev"),
+            GetSchemaPrefix(schema, ns + "amd"),
+            GetSchemaPrefix(schema, ns + "corr"));
     }
 
     private static XElement? FindSchemaNode(XDocument document, string namespaceUri) =>
         document.Descendants()
-            .FirstOrDefault(x => x.Elements().Any(e => e.Name.NamespaceName == namespaceUri));
+            .FirstOrDefault(x =>
+                x.Elements().Any(e => e.Name.NamespaceName == namespaceUri) ||
+                x.Attributes().Any(a => a.Name.NamespaceName == namespaceUri));
+
+    /// <summary>
+    /// Reads a value from an XMP schema node, checking child elements first then attributes.
+    /// XMP can represent properties as either child elements or attributes on rdf:Description.
+    /// </summary>
+    private static string? ReadSchemaValue(XElement schema, XName name)
+    {
+        // Try child element first (e.g. <pdfaid:part>1</pdfaid:part>)
+        var element = schema.Element(name);
+        if (element is not null) return element.Value;
+        // Fall back to attribute (e.g. pdfaid:part="1")
+        return schema.Attribute(name)?.Value;
+    }
+
+    /// <summary>
+    /// Gets the namespace prefix for a property in an XMP schema node.
+    /// </summary>
+    private static string? GetSchemaPrefix(XElement schema, XName name)
+    {
+        var element = schema.Element(name);
+        if (element is not null)
+            return element.GetPrefixOfNamespace(element.Name.Namespace);
+        var attr = schema.Attribute(name);
+        if (attr is not null)
+            return schema.GetPrefixOfNamespace(attr.Name.Namespace);
+        return null;
+    }
 
     private static string? GetPrefix(XElement? element)
     {
@@ -2427,7 +3384,8 @@ internal sealed class PdfModelBuilder
         }
 
         var rawType = ConvertPdfObjectToString(element.Get(new PdfName("S")));
-        var standardType = ResolveStandardType(rawType, out var circular, out var remappedStandardType);
+        var elementNs = element.GetOptionalValue<PdfDictionary>(new PdfName("NS"));
+        var standardType = ResolveStandardType(rawType, elementNs, out var circular, out var remappedStandardType);
         var lang = ConvertPdfObjectToString(element.Get(LangName));
         var info = new StructInfo(
             rawType,
@@ -2461,13 +3419,29 @@ internal sealed class PdfModelBuilder
         return _tableCellInfoCache.TryGetValue(element, out cellInfo!);
     }
 
-    private string? ResolveStandardType(string? rawType, out bool circular, out string? remappedStandardType)
+    private string? ResolveStandardType(string? rawType, PdfDictionary? elementNs, out bool circular, out string? remappedStandardType)
     {
         circular = false;
         remappedStandardType = null;
         if (string.IsNullOrEmpty(rawType))
         {
             return null;
+        }
+
+        // Check if the element's namespace is a standard one
+        if (elementNs is not null)
+        {
+            var nsUrl = ConvertPdfObjectToString(elementNs.Get(new PdfName("NS")));
+            if (nsUrl is not null && StandardNamespaceUrls.Contains(nsUrl))
+            {
+                // Element is in a standard namespace — its type is considered standard
+                return rawType;
+            }
+
+            // Try RoleMapNS-based resolution for non-standard namespaces
+            var resolvedViaNamespace = ResolveViaRoleMapNS(rawType, elementNs);
+            if (resolvedViaNamespace is not null)
+                return resolvedViaNamespace;
         }
 
         var roleMap = _document.Catalog.GetOptionalValue<PdfDictionary>(StructTreeRootName)?.GetOptionalValue<PdfDictionary>(RoleMapName);
@@ -2505,6 +3479,50 @@ internal sealed class PdfModelBuilder
         return null;
     }
 
+    /// <summary>
+    /// Follows the RoleMapNS chain from a non-standard namespace to resolve a type to a standard namespace.
+    /// RoleMapNS entries map type names to [targetType, targetNamespace] arrays.
+    /// </summary>
+    private static string? ResolveViaRoleMapNS(string typeName, PdfDictionary ns)
+    {
+        var visited = new HashSet<PdfDictionary>(ReferenceEqualityComparer<PdfDictionary>.Instance);
+        var currentType = typeName;
+        var currentNs = ns;
+
+        while (currentNs is not null && visited.Add(currentNs))
+        {
+            var roleMapNs = currentNs.GetOptionalValue<PdfDictionary>(new PdfName("RoleMapNS"));
+            if (roleMapNs is null)
+                return null;
+
+            var mapping = roleMapNs.Get(new PdfName(currentType))?.Resolve();
+            if (mapping is PdfArray arr && arr.Count >= 2)
+            {
+                var targetType = ConvertPdfObjectToString(arr[0]);
+                var targetNs = arr[1].Resolve() as PdfDictionary;
+
+                if (targetType is null) return null;
+
+                if (targetNs is not null)
+                {
+                    var targetNsUrl = ConvertPdfObjectToString(targetNs.Get(new PdfName("NS")));
+                    if (targetNsUrl is not null && StandardNamespaceUrls.Contains(targetNsUrl))
+                        return targetType; // Resolved to a standard namespace
+                }
+
+                // Continue following the chain
+                currentType = targetType;
+                currentNs = targetNs;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
     private string? GetParentStandardType(PdfDictionary? parent)
     {
         if (parent is null)
@@ -2516,7 +3534,8 @@ internal sealed class PdfModelBuilder
         if (string.Equals(type, "StructElem", StringComparison.Ordinal) || parent.ContainsKey(new PdfName("S")))
         {
             var rawType = ConvertPdfObjectToString(parent.Get(new PdfName("S")));
-            return ResolveStandardType(rawType, out _, out _);
+            var parentNs = parent.GetOptionalValue<PdfDictionary>(new PdfName("NS"));
+            return ResolveStandardType(rawType, parentNs, out _, out _);
         }
 
         return null;
@@ -2953,12 +3972,12 @@ internal sealed class PdfModelBuilder
             return result;
         }
 
+        // Collect all config dicts first to detect duplicate names
+        var configDicts = new List<PdfDictionary>();
         var defaultConfig = ocProperties.GetOptionalValue<PdfDictionary>(DName);
         if (defaultConfig is not null)
         {
-            var model = new GenericModelObject("PDOCConfig");
-            PopulateOcConfig(model, defaultConfig);
-            result.Add(model);
+            configDicts.Add(defaultConfig);
         }
 
         var configs = ocProperties.GetOptionalValue<PdfArray>(ConfigsName);
@@ -2968,11 +3987,29 @@ internal sealed class PdfModelBuilder
             {
                 if (item.Resolve() is PdfDictionary configDict)
                 {
-                    var model = new GenericModelObject("PDOCConfig");
-                    PopulateOcConfig(model, configDict);
-                    result.Add(model);
+                    configDicts.Add(configDict);
                 }
             }
+        }
+
+        // Gather all names and find duplicates
+        var nameCount = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var cd in configDicts)
+        {
+            var name = ConvertPdfObjectToString(cd.Get(PdfName.Name));
+            if (name is not null)
+            {
+                nameCount[name] = nameCount.TryGetValue(name, out var c) ? c + 1 : 1;
+            }
+        }
+
+        foreach (var cd in configDicts)
+        {
+            var model = new GenericModelObject("PDOCConfig");
+            PopulateOcConfig(model, cd);
+            var name = ConvertPdfObjectToString(cd.Get(PdfName.Name));
+            model.Set("hasDuplicateName", name is not null && nameCount.TryGetValue(name, out var cnt) && cnt > 1);
+            result.Add(model);
         }
 
         return result;
@@ -3366,9 +4403,17 @@ internal sealed class PdfModelBuilder
         string? DcTitle,
         PdfUaIdentificationSnapshot? PdfUaIdentification,
         PdfAIdentificationSnapshot? PdfAIdentification,
-        IReadOnlyList<XmpLangAltEntry> LangAlts);
+        IReadOnlyList<XmpLangAltEntry> LangAlts,
+        string? XMPCreateDate,
+        string? XMPModifyDate,
+        string? XMPCreator,
+        int XMPCreatorSize,
+        string? XMPDescription,
+        string? XMPProducer,
+        string? XMPCreatorTool,
+        string? XMPKeywords);
 
-    private sealed record PdfUaIdentificationSnapshot(int? Part, string? PartPrefix, string? AmdPrefix, string? CorrPrefix);
+    private sealed record PdfUaIdentificationSnapshot(int? Part, string? PartPrefix, string? Rev, string? RevPrefix, string? AmdPrefix, string? CorrPrefix);
 
     private sealed record PdfAIdentificationSnapshot(
         int? Part,
@@ -3384,7 +4429,9 @@ internal sealed class PdfModelBuilder
         IReadOnlyDictionary<uint, double> WidthByCharCode,
         IReadOnlyDictionary<uint, bool> GlyphPresenceByCharCode,
         int NumberOfCmaps,
-        bool Cmap30Present);
+        bool Cmap30Present,
+        bool Cmap31Present,
+        bool Cmap10Present);
 
     private sealed class FontUsageInfo
     {
@@ -3453,6 +4500,7 @@ internal sealed class PdfByteAnalysis
     public required bool IsLinearized { get; init; }
     public required int PostEofDataSize { get; init; }
     public required bool ContainsXRefStream { get; init; }
+    public required byte[] RawBytes { get; init; }
 
     public static PdfByteAnalysis Create(byte[] bytes)
     {
@@ -3475,7 +4523,58 @@ internal sealed class PdfByteAnalysis
             IsLinearized = FindAscii(bytes, "/Linearized") >= 0,
             PostEofDataSize = postEofDataSize,
             ContainsXRefStream = FindAscii(bytes, "/Type /XRef") >= 0 || FindAscii(bytes, "/Type/XRef") >= 0,
+            RawBytes = bytes,
         };
+    }
+
+    /// <summary>
+    /// Checks whether the stream/endstream keywords are properly formatted at the given data offset.
+    /// dataOffset is the byte position where the actual stream data begins (right after the EOL following the "stream" keyword).
+    /// </summary>
+    public (bool StreamKeywordCRLFCompliant, bool EndstreamKeywordEOLCompliant) CheckStreamKeywordCompliance(long dataOffset, int declaredLength)
+    {
+        var bytes = RawBytes;
+
+        // streamKeywordCRLFCompliant: after "stream", the next bytes should be either \r\n or \n.
+        // dataOffset points to the first data byte. So bytes[dataOffset-1] should be 0x0A (LF).
+        // If bytes[dataOffset-2] is 0x0D, that's CR+LF (also valid).
+        // If the stream keyword wasn't followed by a proper LF, this will be false.
+        bool streamCRLF = dataOffset > 0 && dataOffset <= bytes.Length && bytes[dataOffset - 1] == 0x0A;
+
+        // endstreamKeywordEOLCompliant: the endstream keyword must be preceded by an EOL marker.
+        // After the stream data at dataOffset+declaredLength, look for "endstream" and check preceding byte.
+        bool endstreamEOL = true;
+        var searchStart = (int)dataOffset + declaredLength;
+        if (searchStart >= 0 && searchStart < bytes.Length)
+        {
+            // Find "endstream" within a small window after the data
+            var endstreamPos = FindAsciiInRange(bytes, "endstream", searchStart, Math.Min(bytes.Length, searchStart + 32));
+            if (endstreamPos >= 0)
+            {
+                endstreamEOL = endstreamPos > 0 && (bytes[endstreamPos - 1] == 0x0A || bytes[endstreamPos - 1] == 0x0D);
+            }
+        }
+
+        return (streamCRLF, endstreamEOL);
+    }
+
+    private static int FindAsciiInRange(byte[] bytes, string needle, int start, int end)
+    {
+        var needleBytes = Encoding.ASCII.GetBytes(needle);
+        for (int i = start; i <= end - needleBytes.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < needleBytes.Length; j++)
+            {
+                if (bytes[i + j] != needleBytes[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return i;
+        }
+        return -1;
     }
 
     private static int FindAscii(byte[] bytes, string needle) =>
@@ -3483,6 +4582,133 @@ internal sealed class PdfByteAnalysis
 
     private static int LastIndexOfAscii(byte[] bytes, string needle) =>
         Encoding.ASCII.GetString(bytes).LastIndexOf(needle, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Extracts the /ID value string from specific physical trailers in the raw PDF bytes.
+    /// Handles both traditional trailer dictionaries and cross-reference stream objects.
+    /// For linearized PDFs, returns (firstPageTrailerId, lastTrailerId).
+    /// For non-linearized PDFs, returns (null, lastTrailerId).
+    /// </summary>
+    internal static (string? FirstPageId, string? LastId) ExtractPhysicalTrailerIds(byte[] bytes, bool isLinearized)
+    {
+        var text = Encoding.ASCII.GetString(bytes);
+
+        // Collect positions of all trailer-equivalent dictionaries:
+        // 1. Traditional: 'trailer' keyword followed by <<...>>
+        // 2. XRef streams: object dictionaries containing /Type /XRef
+        var trailerDictPositions = new List<int>();
+
+        // Find traditional trailer dicts
+        var searchIdx = 0;
+        while (true)
+        {
+            var idx = text.IndexOf("trailer", searchIdx, StringComparison.Ordinal);
+            if (idx < 0) break;
+            var afterTrailer = idx + 7;
+            while (afterTrailer < text.Length && char.IsWhiteSpace(text[afterTrailer]))
+                afterTrailer++;
+            if (afterTrailer < text.Length - 1 && text[afterTrailer] == '<' && text[afterTrailer + 1] == '<')
+            {
+                trailerDictPositions.Add(afterTrailer); // position of '<<'
+            }
+            searchIdx = idx + 7;
+        }
+
+        // Find XRef stream objects (their dict starts at '<<' in "N N obj <<")
+        searchIdx = 0;
+        while (true)
+        {
+            var idx = text.IndexOf("/Type", searchIdx, StringComparison.Ordinal);
+            if (idx < 0) break;
+            // Check if followed by /XRef (with optional whitespace and /)
+            var afterType = idx + 5;
+            while (afterType < text.Length && text[afterType] is ' ' or '/')
+                afterType++;
+            if (afterType + 3 < text.Length && text.AsSpan(afterType, Math.Min(4, text.Length - afterType)).StartsWith("XRef", StringComparison.Ordinal))
+            {
+                // Find "obj" and then "<<" before /Type — search for "obj" pattern before this position
+                var objPos = text.LastIndexOf(" obj", idx, StringComparison.Ordinal);
+                if (objPos >= 0)
+                {
+                    // The dict << should follow "obj" (with optional whitespace)
+                    var dictSearchStart = objPos + 4;
+                    while (dictSearchStart < idx && char.IsWhiteSpace(text[dictSearchStart]))
+                        dictSearchStart++;
+                    if (dictSearchStart < idx && text[dictSearchStart] == '<' && dictSearchStart + 1 < idx && text[dictSearchStart + 1] == '<')
+                    {
+                        trailerDictPositions.Add(dictSearchStart);
+                    }
+                }
+            }
+            searchIdx = idx + 5;
+        }
+
+        if (trailerDictPositions.Count == 0)
+            return (null, null);
+
+        // Sort by position in file
+        trailerDictPositions.Sort();
+
+        // Extract /ID from the first and last trailer dicts
+        var firstId = ExtractIdFromDict(text, trailerDictPositions[0]);
+        var lastId = ExtractIdFromDict(text, trailerDictPositions[^1]);
+
+        if (trailerDictPositions.Count == 1)
+        {
+            return (isLinearized ? firstId : null, lastId);
+        }
+
+        return (isLinearized ? firstId : null, lastId);
+    }
+
+    private static string? ExtractIdFromDict(string text, int dictStart)
+    {
+        if (dictStart < 0 || dictStart >= text.Length - 1) return null;
+        if (text[dictStart] != '<' || text[dictStart + 1] != '<') return null;
+
+        // Find matching >> (handle nested dicts)
+        var depth = 0;
+        var i = dictStart;
+        var dictEnd = -1;
+        while (i < text.Length - 1)
+        {
+            if (text[i] == '<' && text[i + 1] == '<') { depth++; i += 2; continue; }
+            if (text[i] == '>' && text[i + 1] == '>') { depth--; if (depth == 0) { dictEnd = i + 2; break; } i += 2; continue; }
+            i++;
+        }
+        if (dictEnd < 0) return null;
+
+        var dictContent = text.Substring(dictStart, dictEnd - dictStart);
+
+        // Find /ID in the dict
+        var idIdx = dictContent.IndexOf("/ID", StringComparison.Ordinal);
+        if (idIdx < 0) return null;
+
+        // Make sure /ID is not part of a longer key name (e.g., /IDTree, /Index)
+        var charAfterId = idIdx + 3 < dictContent.Length ? dictContent[idIdx + 3] : '\0';
+        if (char.IsLetterOrDigit(charAfterId) || charAfterId == '_')
+            return null;
+
+        // Extract the hex content of the first byte string in the ID array.
+        // /ID [<hex1><hex2>] or /ID[<hex1><hex2>] — we return hex1's content (without <>).
+        // For /ID [<><>] (empty hex strings), we return "" (empty string).
+        // For no /ID key, we return null.
+        var afterId = idIdx + 3;
+        while (afterId < dictContent.Length && char.IsWhiteSpace(dictContent[afterId]))
+            afterId++;
+        if (afterId >= dictContent.Length || dictContent[afterId] != '[')
+            return null;
+
+        // Find the first '<' inside the array
+        var hexStart = dictContent.IndexOf('<', afterId + 1);
+        if (hexStart < 0) return null;
+
+        var hexEnd = dictContent.IndexOf('>', hexStart + 1);
+        if (hexEnd < 0) return null;
+
+        // Return the hex content between < and > (may be empty string for <>)
+        return dictContent.Substring(hexStart + 1, hexEnd - hexStart - 1);
+    }
 
     private static string ReadLine(byte[] bytes, int start)
     {

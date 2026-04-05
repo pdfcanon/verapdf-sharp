@@ -73,12 +73,6 @@ Run corpus integration tests (requires `veraPDF-corpus-staging/` alongside the r
 dotnet test tests/VeraPdfSharp.Tests --filter "FullyQualifiedName~CorpusTests"
 ```
 
-Regenerate the corpus baseline after intentional behavior changes:
-
-```powershell
-dotnet test tests/VeraPdfSharp.Tests --filter CorpusDiag_GenerateBaseline
-```
-
 Diagnose individual corpus failures:
 
 ```powershell
