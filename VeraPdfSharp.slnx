@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VeraPdfSharp.Cli/VeraPdfSharp.Cli.csproj" />
+    <Project Path="src/VeraPdfSharp.Core/VeraPdfSharp.Core.csproj" />
+    <Project Path="src/VeraPdfSharp.Model/VeraPdfSharp.Model.csproj" />
+    <Project Path="src/VeraPdfSharp.Scripting/VeraPdfSharp.Scripting.csproj" />
+    <Project Path="src/VeraPdfSharp.Validation/VeraPdfSharp.Validation.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VeraPdfSharp.Tests/VeraPdfSharp.Tests.csproj" />
+  </Folder>
+</Solution>

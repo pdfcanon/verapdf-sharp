@@ -1,0 +1,78 @@
+## .NET / C# gitignore
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# Rider
+.idea/
+
+# Pre-staged Docker build artifacts (downloaded by CI, never committed)
+docker/tools/*.zip
+
+# NuGet packages
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+# MSBuild outputs / project-level generated files
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# dotnet test results
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage-report/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# User-specific files
+*.rsuser
+*.dbmdl
+*.dbproj.schemaview
+
+# Secrets / local config overrides
+appsettings.local.json
+secrets.json
+.env
+.env.*
+!.env.example
+# committed non-secret per-environment Vite configs
+!frontend/.env.development
+!frontend/.env.staging
+!frontend/.env.production
+
+# Certificates
+*.pfx
+*.p12
+
+# Output from the linker
+publish/
+*.pyc
+__pycache__/
