@@ -999,11 +999,14 @@ internal sealed partial class PdfModelBuilder
     }
 
     private static bool IsExtGStateDictionary(PdfDictionary dictionary) =>
+        string.Equals(ConvertPdfObjectToString(dictionary.Get(PdfName.TypeName)), "ExtGState", StringComparison.Ordinal) ||
         dictionary.ContainsKey(new PdfName("CA")) ||
         dictionary.ContainsKey(new PdfName("ca")) ||
         dictionary.ContainsKey(TRName) ||
         dictionary.ContainsKey(TR2Name) ||
-        dictionary.ContainsKey(HTPName);
+        dictionary.ContainsKey(HTPName) ||
+        dictionary.ContainsKey(BMName) ||
+        dictionary.ContainsKey(SMaskName);
 
     private void PopulateStreamObject(GenericModelObject model, PdfStream stream, ObjectDescriptor descriptor, string? relationName, IPdfObject? parentPdfObject)
     {
@@ -1454,13 +1457,209 @@ internal sealed partial class PdfModelBuilder
 
     private static bool HasTransparency(PdfDictionary page)
     {
-        // A page uses transparency if its Group dictionary has type Transparency
-        var group = page.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
-        if (group is null)
+        var visited = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        if (ResourcesHaveTransparency(page, visited))
+            return true;
+
+        // Check annotation dictionaries and their appearance streams
+        if (page.TryGetValue<PdfArray>(AnnotsName, out var annots, false))
+        {
+            foreach (var annotObj in annots)
+            {
+                var annot = annotObj.Resolve() as PdfDictionary;
+                if (annot is null) continue;
+
+                // Annotations can have BM directly in their dictionary (PDF 2.0)
+                var annotBM = annot.Get(BMName)?.Resolve();
+                if (annotBM is PdfName annotBMName &&
+                    !string.Equals(annotBMName.Value, "Normal", StringComparison.Ordinal) &&
+                    !string.Equals(annotBMName.Value, "Compatible", StringComparison.Ordinal))
+                    return true;
+
+                var ap = annot.GetOptionalValue<PdfDictionary>(new PdfName("AP"));
+                if (ap is null) continue;
+
+                // Check N (normal), R (rollover), D (down) appearance entries
+                foreach (var apKey in new[] { "N", "R", "D" })
+                {
+                    var apEntry = ap.Get(new PdfName(apKey))?.Resolve();
+                    if (apEntry is PdfStream apStream)
+                    {
+                        if (StreamHasTransparency(apStream, visited))
+                            return true;
+                    }
+                    else if (apEntry is PdfDictionary apDict)
+                    {
+                        // Sub-dictionary of appearance states
+                        foreach (var stateKey in apDict.Keys)
+                        {
+                            if (apDict.Get(stateKey)?.Resolve() is PdfStream stateStream &&
+                                StreamHasTransparency(stateStream, visited))
+                                return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Checks if a form XObject stream uses transparency (has a transparency group or
+    /// its sub-resources use transparency).
+    /// </summary>
+    private static bool StreamHasTransparency(PdfStream stream, HashSet<PdfDictionary> visited)
+    {
+        var dict = stream.Dictionary;
+        if (!visited.Add(dict)) return false;
+
+        // Check for transparency group on this stream
+        var group = dict.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+        if (group is not null)
+        {
+            var s = ConvertPdfObjectToString(group.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(group.Get(new PdfName("S")));
+            if (string.Equals(s, "Transparency", StringComparison.Ordinal))
+                return true;
+        }
+
+        // Check sub-resources of this stream
+        var resources = dict.GetOptionalValue<PdfDictionary>(new PdfName("Resources"));
+        if (resources is not null && ResourceDictHasTransparency(resources, visited))
+            return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// Checks if a page or container (which may have a Group and Resources) uses transparency.
+    /// </summary>
+    private static bool ResourcesHaveTransparency(PdfDictionary container, HashSet<PdfDictionary> visited)
+    {
+        if (!visited.Add(container)) return false;
+
+        // Check Group dictionary on the container itself
+        var group = container.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+        if (group is not null)
+        {
+            var sValue = ConvertPdfObjectToString(group.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(group.Get(new PdfName("S")));
+            if (string.Equals(sValue, "Transparency", StringComparison.Ordinal))
+                return true;
+        }
+
+        var resources = container.GetOptionalValue<PdfDictionary>(new PdfName("Resources"));
+        if (resources is null)
             return false;
 
-        var sValue = ConvertPdfObjectToString(group.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(group.Get(new PdfName("S")));
-        return string.Equals(sValue, "Transparency", StringComparison.Ordinal);
+        return ResourceDictHasTransparency(resources, visited);
+    }
+
+    /// <summary>
+    /// Checks if a Resources dictionary contains transparency-inducing entries,
+    /// recursively scanning ExtGState, XObject, Pattern, and Font sub-resources.
+    /// </summary>
+    private static bool ResourceDictHasTransparency(PdfDictionary resources, HashSet<PdfDictionary> visited)
+    {
+        // Check ExtGState resources for SMask, BM, ca/CA
+        var extGStateDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("ExtGState"));
+        if (extGStateDict is not null)
+        {
+            foreach (var key in extGStateDict.Keys)
+            {
+                var gs = extGStateDict.GetOptionalValue<PdfDictionary>(key);
+                if (gs is null) continue;
+
+                // SMask not "None" implies transparency
+                var smask = gs.Get(SMaskName)?.Resolve();
+                if (smask is PdfDictionary) return true;
+                if (smask is PdfName smaskName && !string.Equals(smaskName.Value, "None", StringComparison.Ordinal))
+                    return true;
+
+                // BM not "Normal" or "Compatible" implies transparency
+                var bm = gs.Get(BMName)?.Resolve();
+                if (bm is PdfName bmNameVal &&
+                    !string.Equals(bmNameVal.Value, "Normal", StringComparison.Ordinal) &&
+                    !string.Equals(bmNameVal.Value, "Compatible", StringComparison.Ordinal))
+                    return true;
+                if (bm is PdfArray bmArr)
+                {
+                    foreach (var item in bmArr)
+                    {
+                        var n = ConvertPdfObjectToString(item);
+                        if (n is not null && n != "Normal" && n != "Compatible")
+                            return true;
+                    }
+                }
+
+                // ca or CA < 1.0 implies transparency
+                var caVal = gs.Get(new PdfName("ca"));
+                if (caVal is not null && GetNumberValue(caVal) is double ca && ca < 1.0)
+                    return true;
+                var caUpperVal = gs.Get(new PdfName("CA"));
+                if (caUpperVal is not null && GetNumberValue(caUpperVal) is double caUpper && caUpper < 1.0)
+                    return true;
+            }
+        }
+
+        // Check XObject resources (Form XObjects and Image XObjects)
+        var xObjectDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("XObject"));
+        if (xObjectDict is not null)
+        {
+            foreach (var key in xObjectDict.Keys)
+            {
+                var xObj = xObjectDict.Get(key)?.Resolve();
+                if (xObj is PdfStream xStream)
+                {
+                    var subtype = ConvertPdfObjectToString(xStream.Dictionary.Get(PdfName.Subtype));
+                    if (string.Equals(subtype, "Form", StringComparison.Ordinal))
+                    {
+                        if (StreamHasTransparency(xStream, visited))
+                            return true;
+                    }
+                    // Image XObjects don't directly carry transparency, but they can
+                    // reference SMask streams — check the image's SMask entry
+                    if (xStream.Dictionary.Get(SMaskName)?.Resolve() is PdfStream)
+                        return true;
+                }
+            }
+        }
+
+        // Check Pattern resources (Tiling patterns have their own Resources)
+        var patternDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("Pattern"));
+        if (patternDict is not null)
+        {
+            foreach (var key in patternDict.Keys)
+            {
+                var pat = patternDict.Get(key)?.Resolve();
+                if (pat is PdfStream patStream)
+                {
+                    // Tiling pattern (PatternType 1) — has its own Resources
+                    if (StreamHasTransparency(patStream, visited))
+                        return true;
+                }
+            }
+        }
+
+        // Check Font resources (Type3 fonts have their own Resources)
+        var fontDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("Font"));
+        if (fontDict is not null)
+        {
+            foreach (var key in fontDict.Keys)
+            {
+                var font = fontDict.GetOptionalValue<PdfDictionary>(key);
+                if (font is null) continue;
+                var fontSubtype = ConvertPdfObjectToString(font.Get(PdfName.Subtype));
+                if (!string.Equals(fontSubtype, "Type3", StringComparison.Ordinal)) continue;
+
+                // Type3 fonts have a Resources dictionary
+                var fontResources = font.GetOptionalValue<PdfDictionary>(new PdfName("Resources"));
+                if (fontResources is not null && !visited.Contains(fontResources) &&
+                    ResourceDictHasTransparency(fontResources, visited))
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? GetOutputColorSpace(PdfDictionary container)
@@ -2015,7 +2214,32 @@ internal sealed partial class PdfModelBuilder
 
         // BM (blend mode)
         model.Set("containsBM", extGState.ContainsKey(BMName));
+        var bmRaw = extGState.Get(BMName)?.Resolve();
         model.Set("BMNameValue", ConvertPdfObjectToString(extGState.Get(BMName)));
+
+        // Create CosBM child objects for blend mode validation
+        if (bmRaw is PdfArray bmArray)
+        {
+            var bmObjects = new List<IModelObject>();
+            foreach (var item in bmArray)
+            {
+                var name = ConvertPdfObjectToString(item);
+                if (name is not null)
+                {
+                    var bmObj = new GenericModelObject("CosBM");
+                    bmObj.Set("internalRepresentation", name);
+                    bmObjects.Add(bmObj);
+                }
+            }
+            if (bmObjects.Count > 0)
+                model.Link("BM", bmObjects.ToArray());
+        }
+        else if (bmRaw is PdfName bmName)
+        {
+            var bmObj = new GenericModelObject("CosBM");
+            bmObj.Set("internalRepresentation", bmName.Value);
+            model.Link("BM", bmObj);
+        }
 
         // ca and CA (fill and stroke alpha)
         var caObj = extGState.Get(new PdfName("ca"));
