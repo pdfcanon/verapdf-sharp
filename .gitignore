@@ -76,3 +76,6 @@ secrets.json
 publish/
 *.pyc
 __pycache__/
+
+/upstream*
+/veraPDF-corpus-staging*
