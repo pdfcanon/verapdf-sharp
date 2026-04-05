@@ -90,13 +90,15 @@ When adding support for a new failing rule:
 
 ## Current Limits
 
-The current codebase includes a working validation engine and an initial PdfLexer-backed model slice, but it does not yet cover the full veraPDF object model.
+The current codebase has a working validation engine and broad model coverage for PDF/UA-1 and the PDF/A family, but it does not yet reach full veraPDF parity.
 
-The biggest gaps are:
+The remaining gaps are:
 
-- deep PDF/A object coverage
-- PDF/UA structure tree and tagged-content coverage
-- broader metadata and XMP parity
+- **CMap types** (`PDCMap`, `CMapFile`, `PDReferencedCMap`): font CMap-level rules are not yet executed. These are needed for some PDF/A font-encoding assertions.
+- **Form XObject MCID tracking**: `_formXObjectsWithMcids` cache is declared but not yet populated, so MCID-in-form-XObject checks are incomplete.
+- **`IsUniqueSemanticParent`**: implemented as a heuristic (checks for a `StructParents` key). The upstream logic is more precise.
+- **PDF/UA-2 rules**: the profile loads and rules execute, but the model surface for PDF/UA-2-specific checks has not been verified against the corpus.
+- **Differential parity testing**: there is no automated comparison of results against the upstream Java veraPDF output.
 
 ## Safe Assumptions
 
