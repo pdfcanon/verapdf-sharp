@@ -1,0 +1,57 @@
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t03-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t03-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t04-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t04-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.13 Implementation limits\veraPDF test suite 6-1-13-t08-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.2 File header\veraPDF test suite 6-1-2-t02-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.4 Cross reference table\veraPDF test suite 6-1-4-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.4 Cross reference table\veraPDF test suite 6-1-4-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.6 String objects\veraPDF test suite 6-1-6-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.6 String objects\veraPDF test suite 6-1-6-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.7.1 General\veraPDF test suite 6-1-7-1-t03-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t03-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t03-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t03-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t04-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.1 File structure\6.1.9 Indirect objects\veraPDF test suite 6-1-9-t04-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.1 General\veraPDF test suite 6-2-11-3-1-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.1 General\veraPDF test suite 6-2-11-3-1-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.1 General\veraPDF test suite 6-2-11-3-1-t01-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.2 CIDFonts\veraPDF test suite 6-2-11-3-2-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.2 CIDFonts\veraPDF test suite 6-2-11-3-2-t01-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.3 CMaps\veraPDF test suite 6-2-11-3-3-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.3 CMaps\veraPDF test suite 6-2-11-3-3-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.3 CMaps\veraPDF test suite 6-2-11-3-3-t02-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.3 CMaps\veraPDF test suite 6-2-11-3-3-t03-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.3 Composite fonts\6.2.11.3.3 CMaps\veraPDF test suite 6-2-11-3-3-t03-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.4 Embedding\6.2.11.4.1 General\veraPDF test suite 6-2-11-4-1-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.4 Embedding\6.2.11.4.1 General\veraPDF test suite 6-2-11-4-1-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.4 Embedding\6.2.11.4.1 General\veraPDF test suite 6-2-11-4-1-t02-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.4 Embedding\6.2.11.4.2 Subset embedding\veraPDF test suite 6-2-11-4-2-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.4 Embedding\6.2.11.4.2 Subset embedding\veraPDF test suite 6-2-11-4-2-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.5 Font metrics\veraPDF test suite 6-2-11-5-t01-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.5 Font metrics\veraPDF test suite 6-2-11-5-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.5 Font metrics\veraPDF test suite 6-2-11-5-t01-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.5 Font metrics\veraPDF test suite 6-2-11-5-t01-fail-e.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.6 Character encodings\veraPDF test suite 6-2-11-6-t02-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.8 Use of .notdef glyph\veraPDF test suite 6-2-11-8-t01-fail-b.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.11 Fonts\6.2.11.8 Use of .notdef glyph\veraPDF test suite 6-2-11-8-t01-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.2 Content streams\veraPDF test suite 6-2-2-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.2 Content streams\veraPDF test suite 6-2-2-t04-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.2 Content streams\veraPDF test suite 6-2-2-t04-fail-e.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.2 Content streams\veraPDF test suite 6-2-2-t04-fail-f.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t02-fail-a.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.4.3 Uncalibrated -Device colour spaces\veraPDF test suite 6-2-4-3-t01-fail-j.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.4.3 Uncalibrated -Device colour spaces\veraPDF test suite 6-2-4-3-t02-fail-g.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.4.3 Uncalibrated -Device colour spaces\veraPDF test suite 6-2-4-3-t02-fail-h.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.4.4 Separation and DeviceN colour spaces\veraPDF test suite 6-2-4-4-t03-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.2 Graphics\6.2.4.4 Separation and DeviceN colour spaces\veraPDF test suite 6-2-4-4-t03-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.1 General\veraPDF test suite 6-6-2-3-1-t06-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.1 General\veraPDF test suite 6-6-2-3-1-t06-fail-n.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.1 General\veraPDF test suite 6-6-2-3-1-t08-fail-d.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.1 General\veraPDF test suite 6-6-2-3-1-t14-fail-c.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.1 General\veraPDF test suite 6-6-2-3-1-t15-fail-r.pdf.
+Expected FAIL but got PASS for PDF_A-2b\6.6 Metadata\6.6.2 Metadata streams\6.6.2.3 Schemas\6.6.2.3.3 Extension schema container schemas\veraPDF test suite 6-6-2-3-3-t03-fail-b.pdf.

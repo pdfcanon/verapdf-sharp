@@ -629,19 +629,90 @@ internal sealed partial class PdfModelBuilder
     }
 
     /// <summary>
+    /// Strips array prefixes (seq, bag, alt) and choice modifiers from a type string
+    /// to find the base type name. E.g., "seq CustomValueType" → "CustomValueType".
+    /// </summary>
+    private static string ResolveBaseType(string typeStr)
+    {
+        var simplified = SimplifyType(typeStr);
+        while (true)
+        {
+            if (simplified.StartsWith("bag ", StringComparison.Ordinal))
+                simplified = simplified.Substring(4);
+            else if (simplified.StartsWith("seq ", StringComparison.Ordinal))
+                simplified = simplified.Substring(4);
+            else if (simplified.StartsWith("alt ", StringComparison.Ordinal))
+                simplified = simplified.Substring(4);
+            else
+                break;
+        }
+        return typeStr.Length > 0 ? typeStr.Substring(typeStr.Length - simplified.Length) : typeStr;
+    }
+
+    /// <summary>
+    /// Validates an XMP property value against a custom extension-defined type.
+    /// Types with no fields are registered as simple (text-like) in Java,
+    /// types with fields are structured.
+    /// </summary>
+    private static bool ValidateExtensionCustomType(XObject node, string declaredType, bool hasFields)
+    {
+        var simplified = SimplifyType(declaredType);
+
+        // Handle array wrapping: "seq CustomType", "bag CustomType"
+        if (simplified.StartsWith("bag ", StringComparison.Ordinal))
+            return ValidateArray(node, "bag", simplified.Substring(4));
+        if (simplified.StartsWith("seq ", StringComparison.Ordinal))
+            return ValidateArray(node, "seq", simplified.Substring(4));
+        if (simplified.StartsWith("alt ", StringComparison.Ordinal))
+            return ValidateArray(node, "alt", simplified.Substring(4));
+
+        // Direct custom type
+        if (node is XAttribute)
+        {
+            // Attributes are always simple — valid for types without fields
+            return !hasFields;
+        }
+
+        if (node is not XElement el) return false;
+
+        bool isStruct = el.Elements(NsRdf + "Description").Any()
+                     || string.Equals(el.Attribute(NsRdf + "parseType")?.Value, "Resource", StringComparison.Ordinal);
+
+        if (hasFields)
+        {
+            // Custom type with fields → must be structured
+            return isStruct;
+        }
+        else
+        {
+            // Custom type without fields → registered as simple text in Java
+            // Must be a simple value (not structured)
+            return !isStruct && !el.Elements(NsRdf + "Bag").Any()
+                             && !el.Elements(NsRdf + "Seq").Any()
+                             && !el.Elements(NsRdf + "Alt").Any();
+        }
+    }
+
+    /// <summary>
     /// Parses extension schemas from an XMP document and returns a set of
     /// (namespaceURI, propertyName) pairs that are defined by extension schemas.
-    /// Also returns the list of ExtensionSchema model objects for the validator.
+    /// Also returns the list of ExtensionSchema model objects for the validator,
+    /// and a mapping of extension property declared types + custom type definitions.
     /// </summary>
-    private static (HashSet<(string Ns, string Name)> DefinedProperties, List<IModelObject> SchemaObjects) ParseExtensionSchemas(XDocument document)
+    private static (HashSet<(string Ns, string Name)> DefinedProperties,
+        List<IModelObject> SchemaObjects,
+        Dictionary<(string Ns, string Name), string> PropertyTypes,
+        Dictionary<string, bool> CustomTypes) ParseExtensionSchemas(XDocument document)
     {
         var definedProperties = new HashSet<(string, string)>();
         var schemaObjects = new List<IModelObject>();
+        var propertyTypes = new Dictionary<(string, string), string>();
+        var customTypes = new Dictionary<string, bool>(StringComparer.Ordinal);
 
         // Find pdfaExtension:schemas elements
         var schemasElements = document.Descendants(NsPdfaExtension + "schemas").ToList();
         if (schemasElements.Count == 0)
-            return (definedProperties, schemaObjects);
+            return (definedProperties, schemaObjects, propertyTypes, customTypes);
 
         foreach (var schemasElement in schemasElements)
         {
@@ -663,7 +734,8 @@ internal sealed partial class PdfModelBuilder
                 // Each li is an rdf:Description or has child elements
                 var schemaDesc = schemaItem.Element(NsRdf + "Description") ?? schemaItem;
 
-                var definition = ParseExtensionSchemaDefinition(schemaDesc, definedProperties);
+                var definition = ParseExtensionSchemaDefinition(schemaDesc, definedProperties,
+                    propertyTypes, customTypes);
                 definitions.Add(definition);
             }
 
@@ -671,11 +743,13 @@ internal sealed partial class PdfModelBuilder
             schemaObjects.Add(container);
         }
 
-        return (definedProperties, schemaObjects);
+        return (definedProperties, schemaObjects, propertyTypes, customTypes);
     }
 
     private static GenericModelObject ParseExtensionSchemaDefinition(XElement schemaDesc,
-        HashSet<(string, string)> definedProperties)
+        HashSet<(string, string)> definedProperties,
+        Dictionary<(string, string), string> propertyTypes,
+        Dictionary<string, bool> customTypes)
     {
         var definition = new GenericModelObject("ExtensionSchemaDefinition",
             superTypes: new[] { "ExtensionSchemaObject", "XMPObject" });
@@ -703,6 +777,9 @@ internal sealed partial class PdfModelBuilder
         definition.Set("isPropertyValidSeq", IsValidSeq(propertyElem));
         definition.Set("isValueTypeValidSeq", IsValidSeq(valueTypeElem));
 
+        Console.Error.WriteLine($"DEBUG ExtDef: nsURI='{namespaceURIElem?.Value}' isNsUriValid={namespaceURIElem is not null && IsValidUri(namespaceURIElem.Value)} nsUriPrefix={( namespaceURIElem is not null ? GetElementPrefix(namespaceURIElem) : "null" )} schemaPrefix={( schemaElem is not null ? GetElementPrefix(schemaElem) : "null" )} prefixPrefix={( prefixElem is not null ? GetElementPrefix(prefixElem) : "null" )} propPrefix={( propertyElem is not null ? GetElementPrefix(propertyElem) : "null" )} vtPrefix={( valueTypeElem is not null ? GetElementPrefix(valueTypeElem) : "null" )} isPropValidSeq={IsValidSeq(propertyElem)} isVtValidSeq={IsValidSeq(valueTypeElem)}");
+
+
         // Check for undefined fields
         var validDefinitionFields = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -723,11 +800,14 @@ internal sealed partial class PdfModelBuilder
                 var prop = ParseExtensionSchemaProperty(propDesc);
                 extensionProperties.Add(prop);
 
-                // Register the property as defined
+                // Register the property as defined and record its declared type
                 var propName = propDesc.Element(NsPdfaProperty + "name")?.Value?.Trim();
+                var propValueType = propDesc.Element(NsPdfaProperty + "valueType")?.Value?.Trim();
                 if (schemaNamespaceUri is not null && propName is not null)
                 {
                     definedProperties.Add((schemaNamespaceUri, propName));
+                    if (propValueType is not null)
+                        propertyTypes[(schemaNamespaceUri, propName)] = propValueType;
                 }
             }
         }
@@ -742,6 +822,17 @@ internal sealed partial class PdfModelBuilder
             {
                 var vtDesc = vtLi.Element(NsRdf + "Description") ?? vtLi;
                 extensionValueTypes.Add(ParseExtensionSchemaValueType(vtDesc));
+
+                // Collect custom type info: does it have fields?
+                var typeName = vtDesc.Element(NsPdfaType + "type")?.Value?.Trim();
+                var fieldElemForType = vtDesc.Element(NsPdfaType + "field");
+                if (typeName is not null)
+                {
+                    bool hasFields = fieldElemForType is not null
+                        && (fieldElemForType.Element(NsRdf + "Seq") ?? fieldElemForType.Element(NsRdf + "Bag")) is not null
+                        && (fieldElemForType.Element(NsRdf + "Seq") ?? fieldElemForType.Element(NsRdf + "Bag"))!.Elements(NsRdf + "li").Any();
+                    customTypes[typeName] = hasFields;
+                }
             }
         }
         definition.Link("ExtensionSchemaValueTypes", extensionValueTypes.ToArray());
@@ -808,6 +899,7 @@ internal sealed partial class PdfModelBuilder
         vt.Set("isPrefixValidText", prefixElem is not null && IsValidText(prefixElem.Value));
         vt.Set("isDescriptionValidText", descElem is not null && IsValidText(descElem.Value));
         vt.Set("isFieldValidSeq", IsValidSeq(fieldElem));
+        Console.Error.WriteLine($"DEBUG ExtVT: fieldElem={fieldElem is not null} isFieldValidSeq={IsValidSeq(fieldElem)} fieldPrefix={( fieldElem is not null ? GetElementPrefix(fieldElem) : "null" )} children={string.Join(",", vtDesc.Elements().Select(e => e.Name.LocalName))} vtDesc={vtDesc.ToString().Substring(0, Math.Min(500, vtDesc.ToString().Length))}");
 
         var validValueTypeFields = new HashSet<string>(StringComparer.Ordinal)
         {

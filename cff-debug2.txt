@@ -1,0 +1,32 @@
+[DICT-DEBUG] glyph name=slash codePoint=47 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[15] = 343 (firstChar=32)
+[CFF-TOP] isCid=False topFM=[0.00048828099,0,0,0.00048828099,0,0] fdArrayOff=0 fdSelOff=0 charStringsCount=273
+[CFF-TOP-KEYS] op=1(vals=1), op=4(vals=1), op=3093(vals=1), op=5(vals=4), op=3079(vals=6), op=15(vals=1), op=16(vals=1), op=17(vals=1), op=18(vals=2)
+[DICT-DEBUG] glyph name=C codePoint=67 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[35] = 503 (firstChar=32)
+[DICT-DEBUG] glyph name=h codePoint=104 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[72] = 384 (firstChar=32)
+[DICT-DEBUG] glyph name=a codePoint=97 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[65] = 317 (firstChar=32)
+[DICT-DEBUG] glyph name=r codePoint=114 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[82] = 261 (firstChar=32)
+[DICT-DEBUG] glyph name=S codePoint=83 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[51] = 368 (firstChar=32)
+[DICT-DEBUG] glyph name=e codePoint=101 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[69] = 325 (firstChar=32)
+[DICT-DEBUG] glyph name=t codePoint=116 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[84] = 229 (firstChar=32)
+[DICT-DEBUG] glyph name=space codePoint=32 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[0] = 201 (firstChar=32)
+[DICT-DEBUG] glyph name=e codePoint=101 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[69] = 325 (firstChar=32)
+[DICT-DEBUG] glyph name=n codePoint=110 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[78] = 388 (firstChar=32)
+[DICT-DEBUG] glyph name=t codePoint=116 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[84] = 229 (firstChar=32)
+[DICT-DEBUG] glyph name=r codePoint=114 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[82] = 261 (firstChar=32)
+[DICT-DEBUG] glyph name=y codePoint=121 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[89] = 331 (firstChar=32)
+[DICT-DEBUG] glyph name=space codePoint=32 CID= subtype=Type1 font==True
+[DICT-DEBUG]   /Widths[0] = 201 (firstChar=32)

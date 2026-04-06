@@ -363,6 +363,10 @@ internal sealed partial class PdfModelBuilder
     private readonly Dictionary<PdfStream, XmpMetadataSnapshot?> _xmpCache = new(ReferenceEqualityComparer<PdfStream>.Instance);
     private readonly Dictionary<PdfDictionary, FontUsageInfo> _fontUsage = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly HashSet<PdfDictionary> _allFontDicts = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
+    // Fonts selected by Tf and followed by text-showing operators in content streams.
+    // PdfLexer may not produce text segments for non-embedded fonts, so we scan content
+    // streams directly to detect fonts used in text rendering.
+    private readonly Dictionary<PdfDictionary, int> _fontsReferencedInContent = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, FontProgramInfo?> _fontProgramCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, GenericModelObject?> _trueTypeFontProgramObjects = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, CffWidthInfo?> _cffWidthCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
@@ -542,7 +546,7 @@ internal sealed partial class PdfModelBuilder
         // Parse extension schemas and create XMPProperty objects from the XMP document
         if (snapshot.Document is not null)
         {
-            var (extensionDefinedProps, extensionSchemaObjects) = ParseExtensionSchemas(snapshot.Document);
+            var (extensionDefinedProps, extensionSchemaObjects, extensionPropertyTypes, extensionCustomTypes) = ParseExtensionSchemas(snapshot.Document);
 
             // link ExtensionSchemasContainers
             if (extensionSchemaObjects.Count > 0)
@@ -577,7 +581,28 @@ internal sealed partial class PdfModelBuilder
                         isValueTypeCorrect = ValidateValueType(xNode, type2004);
                 }
                 else if (isDefinedInExtension)
-                    isValueTypeCorrect = true; // Extension-defined without predefined type — assume correct
+                {
+                    // Look up the declared type from the extension schema
+                    if (extensionPropertyTypes.TryGetValue((ns, localName), out var extDeclaredType))
+                    {
+                        // Resolve the base type (strip array prefixes: "seq Foo" → "Foo")
+                        var baseType = ResolveBaseType(extDeclaredType);
+                        if (extensionCustomTypes.TryGetValue(baseType, out var hasFields))
+                        {
+                            // Custom extension type: validate based on whether it defines fields
+                            isValueTypeCorrect = ValidateExtensionCustomType(xNode, extDeclaredType, hasFields);
+                        }
+                        else
+                        {
+                            // Predefined type used in extension property
+                            isValueTypeCorrect = ValidateValueType(xNode, extDeclaredType);
+                        }
+                    }
+                    else
+                    {
+                        isValueTypeCorrect = true; // Extension-defined without declared type — assume correct
+                    }
+                }
 
                 var propId = string.IsNullOrEmpty(prefix) ? localName : $"{prefix}:{localName}";
 
@@ -2094,6 +2119,11 @@ internal sealed partial class PdfModelBuilder
             model.Link("contentRenderingIntents", riIntents.ToArray());
         }
 
+        // Scan content for Tf + text operators to detect fonts that are used in
+        // text-showing operators even when PdfLexer can't produce glyph data
+        // (e.g., non-embedded fonts).
+        ScanContentStreamFontReferences(page);
+
         // Emit CosLang for page-level Lang entry
         var pageLang = ConvertPdfObjectToString(page.Get(LangName));
         if (!string.IsNullOrEmpty(pageLang))
@@ -2344,6 +2374,79 @@ internal sealed partial class PdfModelBuilder
         }
         catch { }
         return result;
+    }
+
+    /// <summary>
+    /// Scan a page's content streams to discover which fonts are referenced by
+    /// text-showing operators (Tj, TJ, ', "). PdfLexer may not produce text content
+    /// for non-embedded fonts, so we scan operators directly to avoid marking such
+    /// fonts as unused.
+    /// </summary>
+    private void ScanContentStreamFontReferences(PdfDictionary page)
+    {
+        try
+        {
+            var scanner = new PageContentScanner(ParsingContext.Current, page, flattenForms: true);
+            PdfDictionary? currentFont = null;
+            int currentRenderingMode = 0;
+            var gsStack = new Stack<(PdfDictionary? font, int renderMode)>();
+
+            while (scanner.Advance())
+            {
+                switch (scanner.CurrentOperator)
+                {
+                    case PdfOperatorType.Tf:
+                        if (scanner.TryGetCurrentOperation<double>(out var tfOp) && tfOp is Tf_Op<double> tf)
+                        {
+                            var fontName = tf.font;
+                            if (fontName is not null)
+                            {
+                                var fonts = scanner.Resources?.GetOptionalValue<PdfDictionary>(PdfName.Font);
+                                var fontObj = fonts?.Get(fontName)?.Resolve() as PdfDictionary;
+                                if (fontObj is not null)
+                                {
+                                    currentFont = GetValidationFontDictionary(fontObj);
+                                }
+                            }
+                        }
+                        break;
+                    case PdfOperatorType.Tr:
+                        if (scanner.TryGetCurrentOperation<double>(out var trOp) && trOp is Tr_Op<double> tr)
+                        {
+                            currentRenderingMode = tr.render;
+                        }
+                        break;
+                    case PdfOperatorType.Tj:
+                    case PdfOperatorType.TJ:
+                    case PdfOperatorType.singlequote:
+                    case PdfOperatorType.doublequote:
+                        if (currentFont is not null)
+                        {
+                            // Record lowest (most visible) rendering mode seen for this font
+                            if (_fontsReferencedInContent.TryGetValue(currentFont, out var existingMode))
+                            {
+                                if (currentRenderingMode != 3 && existingMode == 3)
+                                    _fontsReferencedInContent[currentFont] = currentRenderingMode;
+                            }
+                            else
+                            {
+                                _fontsReferencedInContent[currentFont] = currentRenderingMode;
+                            }
+                        }
+                        break;
+                    case PdfOperatorType.q:
+                        gsStack.Push((currentFont, currentRenderingMode));
+                        break;
+                    case PdfOperatorType.Q:
+                        if (gsStack.Count > 0)
+                        {
+                            (currentFont, currentRenderingMode) = gsStack.Pop();
+                        }
+                        break;
+                }
+            }
+        }
+        catch { }
     }
 
     /// <summary>
@@ -3295,6 +3398,16 @@ internal sealed partial class PdfModelBuilder
                 // Font was used in content — only set mode 3 if exclusively invisible
                 if (usage.HasUsage && usage.OnlyInvisible)
                     fontObj.Set("renderingMode", 3);
+            }
+            else if (_fontsReferencedInContent.TryGetValue(fontDict, out var contentMode))
+            {
+                // Font was referenced by Tf + text-showing operator but PdfLexer
+                // didn't produce glyphs (e.g., non-embedded font). Use the rendering
+                // mode observed in the content stream.
+                if (contentMode == 3)
+                    fontObj.Set("renderingMode", 3);
+                // else leave renderingMode as null (the default from PopulateFont),
+                // which correctly falls through in the embedding rule.
             }
             else
             {

@@ -1,0 +1,48 @@
+[DICT-DEBUG] glyph name=slash codePoint=47 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[15] = 343 (firstChar=32)
+[CFF-TOP] isCid=False topFM=[0.00048828099,0,0,0.00048828099,0,0] fdArrayOff=0 fdSelOff=0
+[CFF-TOP-KEYS] op=1(vals=1), op=4(vals=1), op=3093(vals=1), op=5(vals=4), op=3079(vals=6), op=15(vals=1), op=16(vals=1), op=17(vals=1), op=18(vals=2)
+[CFF-CHARSET] offset=250 nGlyphs=12 entries=11
+  [0] GID=1 SID=1 name=space
+  [1] GID=2 SID=16 name=slash
+  [2] GID=3 SID=36 name=C
+  [3] GID=4 SID=52 name=S
+  [4] GID=5 SID=66 name=a
+  [5] GID=6 SID=70 name=e
+  [6] GID=7 SID=73 name=h
+  [7] GID=8 SID=79 name=n
+  [8] GID=9 SID=83 name=r
+  [9] GID=10 SID=85 name=t
+  [10] GID=11 SID=90 name=y
+[CFF-GLYPH] GID=1 SID=1 name=space rawWidth=412 scaledWidth=201.17176788 csOff=378 csLen=1 defW=412 nomW=756 first4bytes=0E
+[CFF-GLYPH] GID=2 SID=16 name=slash rawWidth=702 scaledWidth=342.77325498 csOff=379 csLen=63 defW=412 nomW=756 first4bytes=55-FB-4A-1C
+[CFF-GLYPH] GID=3 SID=36 name=C rawWidth=1030 scaledWidth=502.92941970000004 csOff=442 csLen=135 defW=412 nomW=756 first4bytes=F7-A6-6F-D6
+[CFF-GLYPH] GID=7 SID=73 name=h rawWidth=787 scaledWidth=384.27713913 csOff=1116 csLen=240 defW=412 nomW=756 first4bytes=AA-86-BB-F8
+[DICT-DEBUG] glyph name=C codePoint=67 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[35] = 503 (firstChar=32)
+[DICT-DEBUG] glyph name=h codePoint=104 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[72] = 384 (firstChar=32)
+[DICT-DEBUG] glyph name=a codePoint=97 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[65] = 317 (firstChar=32)
+[DICT-DEBUG] glyph name=r codePoint=114 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[82] = 261 (firstChar=32)
+[DICT-DEBUG] glyph name=S codePoint=83 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[51] = 368 (firstChar=32)
+[DICT-DEBUG] glyph name=e codePoint=101 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[69] = 325 (firstChar=32)
+[DICT-DEBUG] glyph name=t codePoint=116 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[84] = 229 (firstChar=32)
+[DICT-DEBUG] glyph name=space codePoint=32 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[0] = 201 (firstChar=32)
+[DICT-DEBUG] glyph name=e codePoint=101 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[69] = 325 (firstChar=32)
+[DICT-DEBUG] glyph name=n codePoint=110 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[78] = 388 (firstChar=32)
+[DICT-DEBUG] glyph name=t codePoint=116 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[84] = 229 (firstChar=32)
+[DICT-DEBUG] glyph name=r codePoint=114 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[82] = 261 (firstChar=32)
+[DICT-DEBUG] glyph name=y codePoint=121 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[89] = 331 (firstChar=32)
+[DICT-DEBUG] glyph name=space codePoint=32 CID= subtype=Type1
+[DICT-DEBUG]   /Widths[0] = 201 (firstChar=32)
