@@ -13,6 +13,11 @@ public sealed class ParserTests
 
         using var parser = PdfLexerValidationParser.FromBytes(bytes, PDFAFlavour.PDFA2B, "sample.pdf");
         var root = parser.GetRoot();
+
+        // CosDocument root should have containsPDFAIdentification
+        Assert.Equal("CosDocument", root.ObjectType);
+        Assert.Equal(true, root.GetPropertyValue("containsPDFAIdentification"));
+
         var document = Assert.Single(root.GetLinkedObjects("document"));
 
         Assert.Equal("PDDocument", document.ObjectType);
@@ -668,6 +673,20 @@ EMC
         Encoding.ASCII.GetBytes("prtr").CopyTo(bytes, 12);
         Encoding.ASCII.GetBytes("RGB ").CopyTo(bytes, 16);
         return bytes;
+    }
+
+    [Fact]
+    public void CorpusFile_ContainsPDFAIdentification()
+    {
+        var corpus = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "veraPDF-corpus-staging"));
+        var dir = Path.Combine(corpus, "PDF_A-1b");
+        if (!Directory.Exists(dir)) return;
+        var file = Directory.EnumerateFiles(dir, "*.pdf", SearchOption.AllDirectories).First(f => f.Contains("-pass-"));
+        using var parser = PdfLexerValidationParser.FromFile(file, PDFAFlavour.PDFA1B);
+        var root = parser.GetRoot();
+        Assert.Equal("CosDocument", root.ObjectType);
+        var val = root.GetPropertyValue("containsPDFAIdentification");
+        Assert.True(val is bool b && b, $"containsPDFAIdentification should be true for {Path.GetFileName(file)}, got: {val}");
     }
 
     private static byte[] BuildPdf(IReadOnlyDictionary<int, byte[]> objects, int rootObject, int infoObject)

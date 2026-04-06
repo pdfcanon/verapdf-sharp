@@ -1,0 +1,2 @@
+[CFF-TOP] isCid=False topFM=[0.00048828099,0,0,0.00048828099,0,0] fdArrayOff=0 fdSelOff=0 charStringsCount=273
+[CFF-TOP-KEYS] op=1(vals=1), op=4(vals=1), op=3093(vals=1), op=5(vals=4), op=3079(vals=6), op=15(vals=1), op=16(vals=1), op=17(vals=1), op=18(vals=2)

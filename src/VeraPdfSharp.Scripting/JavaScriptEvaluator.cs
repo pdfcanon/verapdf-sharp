@@ -95,9 +95,14 @@ public sealed class JavaScriptEvaluator : IDisposable
             rewritten = RewriteToken(builder, rewritten, property, $"obj.GetPropertyValue(\"{property}\")");
         }
 
+        var propertySet = new HashSet<string>(obj.Properties, StringComparer.Ordinal);
         foreach (var link in obj.Links)
         {
             var token = $"{link}_size";
+            // Skip if the token was already handled as a property to avoid
+            // double-rewriting inside string literals of the generated code.
+            if (propertySet.Contains(token))
+                continue;
             rewritten = RewriteToken(builder, rewritten, token, $"obj.GetLinkedObjects(\"{link}\").Count");
         }
 

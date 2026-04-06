@@ -36,6 +36,7 @@ if (flavour == PDFAFlavour.NoFlavour)
 }
 
 using var parser = PdfLexerValidationParser.FromFile(file, flavour);
+
 var validator = ValidatorFactory.CreateValidator(new[] { flavour }, new ValidatorOptions(ShowErrorMessages: true));
 var result = validator.Validate(parser);
 
@@ -44,6 +45,38 @@ Console.WriteLine($"Flavour: {result.Flavour.GetMetadata().DisplayName}");
 Console.WriteLine($"Compliant: {result.IsCompliant}");
 Console.WriteLine($"Assertions: {result.TotalAssertions}");
 Console.WriteLine($"Failed rules: {result.FailedChecks.Count}");
+
+// Temporary diagnostic: dump model object tree
+{
+    var root = parser.GetRoot();
+    var stack = new Stack<(VeraPdfSharp.Model.IModelObject Obj, string Path)>();
+    var seen = new HashSet<VeraPdfSharp.Model.IModelObject>(ReferenceEqualityComparer.Instance);
+    stack.Push((root, "root"));
+    var typeCounts = new Dictionary<string, int>();
+    while (stack.Count > 0)
+    {
+        var (obj, path) = stack.Pop();
+        if (!seen.Add(obj)) continue;
+        typeCounts[obj.ObjectType] = typeCounts.GetValueOrDefault(obj.ObjectType) + 1;
+        if (obj.ObjectType.Contains("Font", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"  FONT: {obj.ObjectType} @ {path}");
+            foreach (var prop in new[] { "Subtype", "fontName", "CIDFontOrdering", "CIDFontRegistry", "cmapName", "CMapOrdering", "CMapRegistry", "CIDToGIDMap", "containsFontFile", "containsEmbeddedFile", "renderingMode", "containsCIDSet", "CharSet", "charSetListsAllGlyphs", "cidSetListsAllGlyphs" })
+            {
+                Console.WriteLine($"    {prop} = {obj.GetPropertyValue(prop)}");
+            }
+        }
+        foreach (var link in obj.Links.Reverse())
+        {
+            var linked = obj.GetLinkedObjects(link);
+            for (var i = linked.Count - 1; i >= 0; i--)
+                stack.Push((linked[i], $"{path}/{link}[{i}]"));
+        }
+    }
+    Console.WriteLine($"Model objects: {seen.Count}");
+    foreach (var kv in typeCounts.OrderBy(x => x.Key))
+        Console.WriteLine($"  {kv.Key}: {kv.Value}");
+}
 
 foreach (var assertion in result.TestAssertions.Where(static x => x.Status == TestAssertionStatus.Failed).Take(25))
 {

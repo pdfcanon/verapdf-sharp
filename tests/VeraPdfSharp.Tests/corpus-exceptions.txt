@@ -1,6 +1,0 @@
-# Corpus exceptions baseline — auto-generated
-# Files listed here have outcomes that deviate from filename convention.
-# -pass- files listed here actually FAIL; -fail- files listed here actually PASS.
-# Generated: 2026-04-05 04:24:46 UTC
-# Total exceptions: 0
-
