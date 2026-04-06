@@ -264,8 +264,11 @@ internal sealed partial class PdfModelBuilder
     private static readonly PdfName FieldsName = new("Fields");
     private static readonly PdfName HTOName = new("HTO");
     private static readonly PdfName HTPName = new("HTP");
+    private static readonly PdfName IntentName = new("Intent");
     private static readonly PdfName InterpolateName = new("Interpolate");
     private static readonly PdfName KidsName = new("K");
+    private static readonly PdfName FFilterName = new("FFilter");
+    private static readonly PdfName FDecodeParmsName = new("FDecodeParms");
     private static readonly PdfName LangName = new("Lang");
     private static readonly PdfName MarkedName = new("Marked");
     private static readonly PdfName NeedAppearancesName = new("NeedAppearances");
@@ -302,6 +305,7 @@ internal sealed partial class PdfModelBuilder
     private static readonly PdfName SMaskName = new("SMask");
     private static readonly PdfName BMName = new("BM");
     private static readonly PdfName AFName = new("AF");
+    private static readonly PdfName ContentsName = new("Contents");
 
     // PDF 1.7 (ISO 32000-1:2008, 14.8.4) standard structure types — used for remapping checks (rule 7.1/7)
     private static readonly HashSet<string> Pdf17StandardStructTypes = new(StringComparer.Ordinal)
@@ -378,12 +382,15 @@ internal sealed partial class PdfModelBuilder
     private PdfDictionary? _currentPageDict;
     // GTS_PDFA1-only output color space from the document catalog, used for gOutputCS in PDFA-1/2 rules.
     private string? _pdfa1OutputCS;
+    // Hex string index built from raw PDF bytes for CosString validation
+    private HexStringIndex? _hexStringIndex;
 
     public PdfModelBuilder(PdfDocument document, PdfByteAnalysis analysis, string? sourceName)
     {
         _document = document;
         _analysis = analysis;
         _sourceName = sourceName;
+        _hexStringIndex = HexStringIndex.Build(analysis.RawBytes);
     }
 
     private void PreScanReferencedFormXObjects()
@@ -488,6 +495,17 @@ internal sealed partial class PdfModelBuilder
         {
             root.Link("metadata", metadataObjects.ToArray());
         }
+
+        // CosIndirect objects for each indirect object — checks byte-level spacing around obj/endobj
+        var indirects = BuildCosIndirectObjects(_analysis.RawBytes);
+        if (indirects.Length > 0)
+        {
+            root.Link("indirectObjects", indirects);
+        }
+
+        // CosXRef — checks EOL markers after "xref" keyword in cross-reference tables
+        var xref = BuildCosXRef(_analysis.RawBytes);
+        root.Link("xref", xref);
 
         ApplyFontRenderingModes();
 
@@ -1061,6 +1079,14 @@ internal sealed partial class PdfModelBuilder
         model.Set("streamKeywordCRLFCompliant", streamCRLF);
         model.Set("endstreamKeywordEOLCompliant", endstreamEOL);
 
+        // CosStream F/FFilter/FDecodeParms — external stream file references (must be null for PDF/A)
+        model.Set("F", ConvertPdfObjectToString(stream.Dictionary.Get(PdfName.F)));
+        model.Set("FFilter", ConvertPdfObjectToString(stream.Dictionary.Get(FFilterName)));
+        model.Set("FDecodeParms", ConvertPdfObjectToString(stream.Dictionary.Get(FDecodeParmsName)));
+
+        // keysString: ampersand-delimited list of dictionary keys (used by rule error arguments)
+        model.Set("keysString", string.Join("&", stream.Dictionary.Keys.Select(k => k.Value)));
+
         // PDContentStream needs inheritedResourceNames and undefinedResourceNames
         if (string.Equals(model.ObjectType, "PDContentStream", StringComparison.Ordinal))
         {
@@ -1103,6 +1129,15 @@ internal sealed partial class PdfModelBuilder
             model.Set("internalRepresentation", GetInternalRepresentation(stream));
             model.Set("colorSpace", GetColorSpaceName(stream.Dictionary.Get(PdfName.ColorSpace)));
             model.Set("BitsPerComponent", GetNumberValue(stream.Dictionary.Get(new PdfName("BitsPerComponent"))));
+
+            // Link CosRenderingIntent from /Intent key on XObject images
+            var intentObj = stream.Dictionary.Get(IntentName);
+            if (intentObj?.Resolve() is PdfName intentName)
+            {
+                var cosIntent = new GenericModelObject("CosRenderingIntent");
+                cosIntent.Set("internalRepresentation", intentName.Value);
+                model.Link("Intent", cosIntent);
+            }
 
             if (string.Equals(model.ObjectType, "JPEG2000", StringComparison.Ordinal))
             {
@@ -1343,6 +1378,29 @@ internal sealed partial class PdfModelBuilder
             model.Set("realValue", (double)number);
             model.Set("intValue", (double)number);
         }
+
+        // CosString needs isHex, containsOnlyHex, hexCount for hex string validation
+        if (resolved is PdfString pdfStr)
+        {
+            var isHex = pdfStr.StringType == PdfStringType.Hex;
+            model.Set("isHex", isHex);
+            if (isHex)
+            {
+                // PdfLexer already decoded the hex string; we need the raw source data
+                // to determine containsOnlyHex and hexCount. Look these up from the pre-scanned index.
+                if (_hexStringIndex is not null && _hexStringIndex.TryLookup(pdfStr.Value, out var hexInfo))
+                {
+                    model.Set("containsOnlyHex", hexInfo.ContainsOnlyHex);
+                    model.Set("hexCount", hexInfo.HexCount);
+                }
+                else
+                {
+                    // Fallback: assume well-formed if not found in index
+                    model.Set("containsOnlyHex", true);
+                    model.Set("hexCount", pdfStr.GetRawBytes().Length * 2);
+                }
+            }
+        }
     }
 
     private static readonly HashSet<string> _deferredKeys = new(StringComparer.Ordinal) { "AA", "EF" };
@@ -1363,6 +1421,22 @@ internal sealed partial class PdfModelBuilder
             if (TryConvertScalar(resolved, out var scalar))
             {
                 model.Set(keyName, scalar);
+
+                // Create model objects for primitive values exceeding implementation limits
+                // so CosName/CosString length rules (6.1.13) can fire.
+                if (resolved is PdfName pdfNameVal && pdfNameVal.Value.Length > 127)
+                {
+                    var cosName = new GenericModelObject("CosName");
+                    cosName.Set("internalRepresentation", pdfNameVal.Value);
+                    model.Link(keyName, cosName);
+                }
+                else if (resolved is PdfString pdfStrVal && pdfStrVal.Value.Length >= 32768)
+                {
+                    var cosStr = new GenericModelObject("CosString");
+                    cosStr.Set("value", pdfStrVal.Value);
+                    model.Link(keyName, cosStr);
+                }
+
                 continue;
             }
 
@@ -1882,9 +1956,24 @@ internal sealed partial class PdfModelBuilder
             CreateDeviceColorSpaceObject(transparencyCS, colorSpaceObjects, documentOutputCS, pageOutputCS, transparencyCS);
         }
 
+        // Scan annotation appearance streams for device colour space usage
+        if (annots is not null)
+        {
+            ScanAnnotationAppearanceColorSpaces(annots, colorSpaceObjects, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+        }
+
         if (colorSpaceObjects.Count > 0)
         {
             model.Link("colorSpaces", colorSpaceObjects.ToArray());
+        }
+
+        // Scan decompressed content stream bytes for hex strings.
+        // This catches hex strings used as text operands (Tj/TJ) that don't go
+        // through BuildObject/PopulatePrimitiveObject.
+        var contentHexStrings = ScanContentStreamHexStrings(page);
+        if (contentHexStrings.Count > 0)
+        {
+            model.Link("contentHexStrings", contentHexStrings.ToArray());
         }
 
         // Emit CosLang for page-level Lang entry
@@ -1994,6 +2083,51 @@ internal sealed partial class PdfModelBuilder
         }
     }
 
+    /// <summary>
+    /// Create a PDInlineImage object from an inline image's header.
+    /// PDInlineImage extends PDXImage in the model — rules for Interpolate, containsOPI, etc. apply.
+    /// </summary>
+    private static GenericModelObject CreatePDInlineImage(PdfArray header, List<IModelObject> result)
+    {
+        var img = new GenericModelObject("PDInlineImage", superTypes: new[] { "PDXImage", "PDXObject" });
+
+        // Inline images use abbreviated key names: I→Interpolate, IM→ImageMask, BPC→BitsPerComponent
+        bool interpolate = false;
+        bool imageMask = false;
+        double? bpc = null;
+
+        for (int i = 0; i < header.Count - 1; i += 2)
+        {
+            if (header[i] is PdfName key)
+            {
+                var val = header[i + 1];
+                switch (key.Value)
+                {
+                    case "I" or "Interpolate":
+                        interpolate = val is PdfBoolean b && b.Value;
+                        break;
+                    case "IM" or "ImageMask":
+                        imageMask = val is PdfBoolean bm && bm.Value;
+                        break;
+                    case "BPC" or "BitsPerComponent":
+                        if (val is PdfNumber n)
+                            bpc = (double)n;
+                        break;
+                }
+            }
+        }
+
+        img.Set("Interpolate", interpolate);
+        img.Set("isMask", imageMask);
+        img.Set("containsAlternates", false); // inline images never have Alternates
+        img.Set("containsOPI", false); // inline images never have OPI
+        if (bpc is not null)
+            img.Set("BitsPerComponent", bpc);
+
+        result.Add(img);
+        return img;
+    }
+
     private void LinkAdditionalActions(GenericModelObject model, PdfDictionary container, string parentType)
     {
         var aaDict = container.GetOptionalValue<PdfDictionary>(AAName);
@@ -2035,6 +2169,394 @@ internal sealed partial class PdfModelBuilder
         {
             return new List<IModelObject>();
         }
+    }
+
+    /// <summary>
+    /// Scan decompressed page content stream bytes for primitives not visible to BuildObject.
+    /// Creates CosString (hex + long literal), CosInteger (out-of-range), and CosName (long)
+    /// objects from content stream operands.
+    /// </summary>
+    private List<IModelObject> ScanContentStreamHexStrings(PdfDictionary page)
+    {
+        var result = new List<IModelObject>();
+        try
+        {
+            var contentsObj = page.Get(ContentsName);
+            if (contentsObj is null) return result;
+            var resolved = contentsObj.Resolve();
+            if (resolved is PdfStream singleStream)
+            {
+                ScanDecompressedBytesForPrimitives(singleStream.Contents.GetDecodedData(), result);
+            }
+            else if (resolved is PdfArray arr)
+            {
+                foreach (var item in arr)
+                {
+                    if (item.Resolve() is PdfStream s)
+                        ScanDecompressedBytesForPrimitives(s.Contents.GetDecodedData(), result);
+                }
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    /// <summary>
+    /// Scan decompressed content stream bytes for hex strings, long literal strings,
+    /// out-of-range integers, and long names. Skips inline image data (ID...EI).
+    /// </summary>
+    private static void ScanDecompressedBytesForPrimitives(byte[] bytes, List<IModelObject> result)
+    {
+        bool inInlineImageData = false;
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            // Skip inline image data sections (ID ... EI)
+            if (!inInlineImageData && i + 2 < bytes.Length &&
+                bytes[i] == (byte)'I' && bytes[i + 1] == (byte)'D' &&
+                (bytes[i + 2] == 0x20 || bytes[i + 2] == 0x0A || bytes[i + 2] == 0x0D))
+            {
+                inInlineImageData = true;
+                i += 2;
+                continue;
+            }
+
+            if (inInlineImageData)
+            {
+                if (i + 1 < bytes.Length && bytes[i] == (byte)'E' && bytes[i + 1] == (byte)'I' &&
+                    (i + 2 >= bytes.Length || bytes[i + 2] <= 0x20) &&
+                    (i > 0 && (bytes[i - 1] == 0x0A || bytes[i - 1] == 0x0D || bytes[i - 1] == 0x20)))
+                {
+                    inInlineImageData = false;
+                    i += 1;
+                }
+                continue;
+            }
+
+            var b = bytes[i];
+
+            // Hex strings <...>
+            if (b == (byte)'<')
+            {
+                if (i + 1 < bytes.Length && bytes[i + 1] == (byte)'<') { i++; continue; } // skip <<
+                int start = i + 1;
+                int hexCount = 0;
+                bool containsOnlyHex = true;
+                int j = start;
+                for (; j < bytes.Length; j++)
+                {
+                    var hb = bytes[j];
+                    if (hb == (byte)'>') break;
+                    if (hb == 0x00 || hb == 0x09 || hb == 0x0A || hb == 0x0C || hb == 0x0D || hb == 0x20) continue;
+                    hexCount++;
+                    if (!IsHexByte(hb)) containsOnlyHex = false;
+                }
+                if (j >= bytes.Length) break;
+                string decodedValue = DecodeHexBytes(bytes, start, j);
+                var cosStr = new GenericModelObject("CosString");
+                cosStr.Set("isHex", true);
+                cosStr.Set("containsOnlyHex", containsOnlyHex);
+                cosStr.Set("hexCount", hexCount);
+                cosStr.Set("value", decodedValue);
+                result.Add(cosStr);
+                i = j;
+                continue;
+            }
+
+            // Literal strings (...) — only create CosString for long ones (>= 32768)
+            if (b == (byte)'(')
+            {
+                int depth = 1;
+                int decodedLen = 0;
+                int j = i + 1;
+                while (j < bytes.Length && depth > 0)
+                {
+                    var sb = bytes[j];
+                    if (sb == (byte)'\\' && j + 1 < bytes.Length)
+                    {
+                        j += 2; // skip escaped char
+                        decodedLen++;
+                    }
+                    else if (sb == (byte)'(') { depth++; j++; decodedLen++; }
+                    else if (sb == (byte)')') { depth--; if (depth > 0) decodedLen++; j++; }
+                    else { j++; decodedLen++; }
+                }
+                if (decodedLen >= 32768)
+                {
+                    var cosStr = new GenericModelObject("CosString");
+                    cosStr.Set("isHex", false);
+                    cosStr.Set("value", new string('X', decodedLen)); // exact content not needed, just length
+                    result.Add(cosStr);
+                }
+                i = j - 1;
+                continue;
+            }
+
+            // Integer operands — detect out-of-range values
+            if ((b >= (byte)'0' && b <= (byte)'9') || (b == (byte)'-' && i + 1 < bytes.Length && bytes[i + 1] >= (byte)'0' && bytes[i + 1] <= (byte)'9'))
+            {
+                // Check preceding byte is whitespace/delimiter (not part of an operator name)
+                if (i > 0) { var prev = bytes[i - 1]; if (prev > 0x20 && prev != (byte)'[' && prev != (byte)'(') continue; }
+                int j = b == (byte)'-' ? i + 1 : i;
+                bool isNeg = b == (byte)'-';
+                bool hasDecimal = false;
+                while (j < bytes.Length && ((bytes[j] >= (byte)'0' && bytes[j] <= (byte)'9') || bytes[j] == (byte)'.'))
+                {
+                    if (bytes[j] == (byte)'.') hasDecimal = true;
+                    j++;
+                }
+                if (!hasDecimal && j - i > 9) // only check integers with many digits (potential overflow)
+                {
+                    var numStr = System.Text.Encoding.ASCII.GetString(bytes, i, j - i);
+                    if (long.TryParse(numStr, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var val))
+                    {
+                        if (val > 2147483647 || val < -2147483648)
+                        {
+                            var cosInt = new GenericModelObject("CosInteger");
+                            cosInt.Set("intValue", (double)val);
+                            result.Add(cosInt);
+                        }
+                    }
+                }
+                i = j - 1;
+                continue;
+            }
+
+            // Name operands /xxx — detect long names (> 127 bytes)
+            if (b == (byte)'/')
+            {
+                int j = i + 1;
+                int decodedLen = 0;
+                while (j < bytes.Length)
+                {
+                    var nb = bytes[j];
+                    if (nb <= 0x20 || nb == (byte)'/' || nb == (byte)'[' || nb == (byte)']' ||
+                        nb == (byte)'(' || nb == (byte)')' || nb == (byte)'<' || nb == (byte)'>' ||
+                        nb == (byte)'{' || nb == (byte)'}') break;
+                    if (nb == (byte)'#' && j + 2 < bytes.Length) { j += 3; decodedLen++; } // #xx escape
+                    else { j++; decodedLen++; }
+                }
+                if (decodedLen > 127)
+                {
+                    var cosName = new GenericModelObject("CosName");
+                    cosName.Set("internalRepresentation", new string('X', decodedLen));
+                    result.Add(cosName);
+                }
+                i = j - 1;
+                continue;
+            }
+        }
+    }
+
+    private static bool IsHexByte(byte b) =>
+        (b >= (byte)'0' && b <= (byte)'9') ||
+        (b >= (byte)'A' && b <= (byte)'F') ||
+        (b >= (byte)'a' && b <= (byte)'f');
+
+    private static string DecodeHexBytes(byte[] raw, int start, int end)
+    {
+        var decoded = new List<byte>();
+        bool highNibble = true;
+        byte current = 0;
+        for (int i = start; i < end; i++)
+        {
+            var b = raw[i];
+            if (b == 0x00 || b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D || b == 0x20) continue;
+            if (!IsHexByte(b)) continue;
+            int val = b >= (byte)'0' && b <= (byte)'9' ? b - (byte)'0' :
+                      b >= (byte)'A' && b <= (byte)'F' ? b - (byte)'A' + 10 :
+                      b - (byte)'a' + 10;
+            if (highNibble) { current = (byte)(val << 4); highNibble = false; }
+            else { current |= (byte)val; decoded.Add(current); current = 0; highNibble = true; }
+        }
+        if (!highNibble) decoded.Add(current);
+        return System.Text.Encoding.GetEncoding("iso-8859-1").GetString(decoded.ToArray());
+    }
+
+    /// <summary>
+    /// Scans raw PDF bytes for all indirect object definitions (N G obj ... endobj)
+    /// and checks byte-level spacing compliance per ISO 19005 clause 6.1.9.
+    /// </summary>
+    private static IModelObject[] BuildCosIndirectObjects(byte[] raw)
+    {
+        int len = raw.Length;
+
+        // Forward-scan for "N ws+ N ws+ obj" patterns starting after EOL.
+        var objHeaders = new List<(int lineStart, int afterObj, bool compliant)>();
+        for (int i = 0; i < len; i++)
+        {
+            byte b = raw[i];
+            // Object definitions start at beginning of line (after EOL or at byte 0)
+            bool isLineStart = (i == 0) || (raw[i - 1] == 0x0A) || (raw[i - 1] == 0x0D);
+            if (!isLineStart) continue;
+
+            // Skip any leading whitespace (this is itself a violation)
+            int j = i;
+            bool hasLeadingWhitespace = false;
+            while (j < len && (raw[j] == 0x20 || raw[j] == 0x09)) { hasLeadingWhitespace = true; j++; }
+
+            // Must start with digits for the object number
+            if (j >= len || raw[j] < (byte)'0' || raw[j] > (byte)'9') continue;
+
+            // Skip object number digits
+            int objNumStart = j;
+            while (j < len && raw[j] >= (byte)'0' && raw[j] <= (byte)'9') j++;
+            if (j == objNumStart) continue; // no digits
+
+            // Count whitespace between obj# and gen#
+            int ws1 = 0;
+            while (j < len && (raw[j] == 0x20 || raw[j] == 0x09)) { ws1++; j++; }
+            if (ws1 == 0) continue;
+
+            // Generation number digits
+            int genStart = j;
+            while (j < len && raw[j] >= (byte)'0' && raw[j] <= (byte)'9') j++;
+            if (j == genStart) continue; // no gen digits
+
+            // Count whitespace between gen# and "obj"
+            int ws2 = 0;
+            while (j < len && (raw[j] == 0x20 || raw[j] == 0x09)) { ws2++; j++; }
+            if (ws2 == 0) continue;
+
+            // Must be "obj" keyword not followed by alpha (exclude "object", "objstm", etc.)
+            if (j + 3 > len) continue;
+            if (raw[j] != (byte)'o' || raw[j + 1] != (byte)'b' || raw[j + 2] != (byte)'j') continue;
+            int afterObj = j + 3;
+            if (afterObj < len && raw[afterObj] >= (byte)'a' && raw[afterObj] <= (byte)'z') continue;
+
+            bool compliant = !hasLeadingWhitespace && (ws1 == 1) && (ws2 == 1);
+
+            // "obj" must be followed by EOL
+            if (afterObj < len && raw[afterObj] != 0x0A && raw[afterObj] != 0x0D)
+                compliant = false;
+
+            objHeaders.Add((i, afterObj, compliant));
+            // Advance past this match to avoid re-scanning digits
+            i = afterObj;
+        }
+
+        // Collect all "endobj" positions
+        var endobjPositions = new List<(int start, int end)>();
+        for (int i = 0; i < len - 5; i++)
+        {
+            if (raw[i] == (byte)'e' && raw[i + 1] == (byte)'n' && raw[i + 2] == (byte)'d' &&
+                raw[i + 3] == (byte)'o' && raw[i + 4] == (byte)'b' && raw[i + 5] == (byte)'j')
+            {
+                if (i + 6 < len && raw[i + 6] >= (byte)'a' && raw[i + 6] <= (byte)'z') continue;
+                endobjPositions.Add((i, i + 6));
+            }
+        }
+
+        // For each obj, pair with nearest endobj and check endobj spacing
+        var result = new IModelObject[objHeaders.Count];
+        int edIdx = 0;
+        for (int k = 0; k < objHeaders.Count; k++)
+        {
+            var (lineStart, afterObj, compliant) = objHeaders[k];
+
+            // Advance endobj index past afterObj
+            while (edIdx < endobjPositions.Count && endobjPositions[edIdx].start < afterObj)
+                edIdx++;
+
+            if (edIdx < endobjPositions.Count)
+            {
+                var (edStart, edEnd) = endobjPositions[edIdx];
+
+                // "endobj" preceded by EOL
+                if (edStart > 0 && raw[edStart - 1] != 0x0A && raw[edStart - 1] != 0x0D)
+                    compliant = false;
+
+                // "endobj" followed by EOL or EOF
+                if (edEnd < len && raw[edEnd] != 0x0A && raw[edEnd] != 0x0D)
+                    compliant = false;
+            }
+
+            var cosIndirect = new GenericModelObject("CosIndirect");
+            cosIndirect.Set("spacingCompliesPDFA", compliant);
+            result[k] = cosIndirect;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Scans raw PDF bytes for "xref" keywords and checks that each is followed by a single EOL
+    /// marker (CR, LF, or CRLF) before the subsection header digits, per ISO 19005 clause 6.1.4.
+    /// </summary>
+    private static IModelObject BuildCosXRef(byte[] raw)
+    {
+        int len = raw.Length;
+        bool xrefEOLCompliant = true;
+        bool subsectionHeaderSpaceSeparated = true;
+        var xrefKeyword = "xref"u8;
+
+        for (int i = 0; i <= len - 4; i++)
+        {
+            // Find "xref" keyword — must be preceded by EOL or at start of file
+            if (raw[i] != (byte)'x' || raw[i + 1] != (byte)'r' ||
+                raw[i + 2] != (byte)'e' || raw[i + 3] != (byte)'f')
+                continue;
+
+            // Must not be part of "startxref"
+            if (i >= 5 && raw[i - 5] == (byte)'s' && raw[i - 4] == (byte)'t' &&
+                raw[i - 3] == (byte)'a' && raw[i - 2] == (byte)'r' && raw[i - 1] == (byte)'t')
+                continue;
+
+            // Must be preceded by whitespace/EOL or be at start
+            if (i > 0 && raw[i - 1] != 0x0A && raw[i - 1] != 0x0D && raw[i - 1] != 0x20 && raw[i - 1] != 0x09)
+                continue;
+
+            int afterXref = i + 4;
+
+            // Check byte after "xref" — must be CR or LF
+            if (afterXref >= len)
+            {
+                xrefEOLCompliant = false;
+                continue;
+            }
+
+            byte space = raw[afterXref];
+            int pos = afterXref + 1;
+
+            if (space == 0x0D) // CR
+            {
+                // Optional LF after CR (CRLF)
+                if (pos < len && raw[pos] == 0x0A)
+                    pos++;
+                // Must be followed by digit (start of subsection header)
+                if (pos >= len || raw[pos] < (byte)'0' || raw[pos] > (byte)'9')
+                    xrefEOLCompliant = false;
+            }
+            else if (space == 0x0A) // LF
+            {
+                // Must be followed by digit
+                if (pos >= len || raw[pos] < (byte)'0' || raw[pos] > (byte)'9')
+                    xrefEOLCompliant = false;
+            }
+            else
+            {
+                // Not an EOL marker after "xref" — fail
+                xrefEOLCompliant = false;
+            }
+
+            // Check subsection header: after "N" digits, must be single space before count digits
+            // Find first space/ws after the first number in subsection header
+            int numStart = pos;
+            while (pos < len && raw[pos] >= (byte)'0' && raw[pos] <= (byte)'9')
+                pos++;
+            if (pos > numStart && pos < len)
+            {
+                if (raw[pos] != 0x20 || pos + 1 >= len || raw[pos + 1] < (byte)'0' || raw[pos + 1] > (byte)'9')
+                    subsectionHeaderSpaceSeparated = false;
+            }
+
+            // Advance past this xref to avoid re-matching
+            i = afterXref;
+        }
+
+        var cosXRef = new GenericModelObject("CosXRef");
+        cosXRef.Set("xrefEOLMarkersComplyPDFA", xrefEOLCompliant);
+        cosXRef.Set("subsectionHeaderSpaceSeparated", subsectionHeaderSpaceSeparated);
+        return cosXRef;
     }
 
     private List<IModelObject> CreateContentObjects(
@@ -2512,7 +3034,8 @@ internal sealed partial class PdfModelBuilder
             if (dict is null)
                 continue;
 
-            var destProfileObj = dict.Get(DestOutputProfileName);
+            // Use indexer [] instead of Get() because Get() resolves indirect refs
+            var destProfileObj = dict.ContainsKey(DestOutputProfileName) ? dict[DestOutputProfileName] : null;
             if (destProfileObj is PdfIndirectRef indRef)
             {
                 profileIndirects.Add(indRef.ToString());
@@ -3623,6 +4146,118 @@ internal sealed partial class PdfModelBuilder
     }
 
     /// <summary>
+    /// Scans annotation appearance streams for device colour space usage.
+    /// Annotation appearances are separate content streams not covered by the
+    /// page's own content stream scanning.
+    /// </summary>
+    private void ScanAnnotationAppearanceColorSpaces(PdfArray annots, List<IModelObject> result,
+        string? documentOutputCS, string? pageOutputCS, string? transparencyCS,
+        string? transparencyIccIndirect, string? transparencyIccMD5)
+    {
+        foreach (var annotObj in annots)
+        {
+            var annot = annotObj.Resolve() as PdfDictionary;
+            if (annot is null) continue;
+
+            var ap = annot.GetOptionalValue<PdfDictionary>(new PdfName("AP"));
+            if (ap is null) continue;
+
+            foreach (var apKey in new[] { "N", "R", "D" })
+            {
+                var apEntry = ap.Get(new PdfName(apKey))?.Resolve();
+                if (apEntry is PdfStream apStream)
+                {
+                    ScanAppearanceStreamColorSpaces(apStream, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                }
+                else if (apEntry is PdfDictionary apDict)
+                {
+                    foreach (var stateKey in apDict.Keys)
+                    {
+                        if (apDict.Get(stateKey)?.Resolve() is PdfStream stateStream)
+                        {
+                            ScanAppearanceStreamColorSpaces(stateStream, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void ScanAppearanceStreamColorSpaces(PdfStream apStream, List<IModelObject> result,
+        string? documentOutputCS, string? pageOutputCS, string? transparencyCS,
+        string? transparencyIccIndirect, string? transparencyIccMD5)
+    {
+        var resources = apStream.Dictionary.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+        var colorSpaceDict = resources?.GetOptionalValue<PdfDictionary>(new PdfName("ColorSpace"));
+
+        // Scan resources for image colour spaces
+        var xobjects = resources?.GetOptionalValue<PdfDictionary>(new PdfName("XObject"));
+        if (xobjects is not null)
+        {
+            foreach (var (_, value) in xobjects)
+            {
+                if (value.Resolve() is PdfStream stream)
+                {
+                    var subtype = ConvertPdfObjectToString(stream.Dictionary.Get(PdfName.Subtype));
+                    if (string.Equals(subtype, "Image", StringComparison.Ordinal))
+                    {
+                        var csObj = stream.Dictionary.Get(PdfName.ColorSpace);
+                        CreateColorSpaceObjectFromRef(csObj, resources!, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                    }
+                }
+            }
+        }
+
+        // Scan content stream operators for device colour spaces
+        try
+        {
+            var data = apStream.Contents.GetDecodedData();
+            var scanner = new ContentStreamScanner(ParsingContext.Current, data);
+            while (scanner.Advance())
+            {
+                string? csName = scanner.CurrentOperator switch
+                {
+                    PdfOperatorType.rg or PdfOperatorType.RG => "DeviceRGB",
+                    PdfOperatorType.g or PdfOperatorType.G => "DeviceGray",
+                    PdfOperatorType.k or PdfOperatorType.K => "DeviceCMYK",
+                    _ => null
+                };
+
+                if (csName is null && scanner.CurrentOperator is PdfOperatorType.cs or PdfOperatorType.CS)
+                {
+                    if (scanner.TryGetCurrentOperation<double>(out var csOp))
+                    {
+                        PdfName? csOpName = csOp switch
+                        {
+                            cs_Op<double> csTyped => csTyped.name,
+                            CS_Op<double> csTyped => csTyped.name,
+                            _ => null
+                        };
+                        if (csOpName is not null && csOpName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                            csName = csOpName.Value;
+                    }
+                }
+
+                if (csName is null) continue;
+
+                // Check for Default* override in appearance stream resources
+                string? defaultKey = csName switch
+                {
+                    "DeviceRGB" => "DefaultRGB",
+                    "DeviceCMYK" => "DefaultCMYK",
+                    "DeviceGray" => "DefaultGray",
+                    _ => null
+                };
+                if (defaultKey is not null && colorSpaceDict is not null && colorSpaceDict.ContainsKey(new PdfName(defaultKey)))
+                    continue;
+
+                CreateDeviceColorSpaceObject(csName, result, documentOutputCS, pageOutputCS, transparencyCS);
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
     /// Creates color space model objects (PDDeviceRGB/CMYK/Gray, ICCInputProfile, etc.)
     /// from a page's or form XObject's resource dictionary and content stream operators.
     /// </summary>
@@ -3657,7 +4292,7 @@ internal sealed partial class PdfModelBuilder
         {
             foreach (var (_, value) in colorSpaceDict)
             {
-                CreateColorSpaceObjectFromRef(value, resources, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                CreateColorSpaceObjectFromRef(value, resources, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5, emitICCBasedCMYK: false);
             }
         }
 
@@ -3762,7 +4397,9 @@ internal sealed partial class PdfModelBuilder
             bool currentOP = false;  // stroke overprint (OP)
             bool currentOp = false;  // fill overprint (op)
             int currentOPM = 0;      // overprint mode
-            var overprintStack = new Stack<(bool OP, bool op, int OPM)>(); // saved state for q/Q
+            GenericModelObject? pendingStrokeIccCmyk = null; // deferred until painting
+            GenericModelObject? pendingFillIccCmyk = null;   // deferred until painting
+            var overprintStack = new Stack<(bool OP, bool op, int OPM, GenericModelObject? strokeCmyk, GenericModelObject? fillCmyk)>();
             var scanner = new PageContentScanner(ParsingContext.Current, resourceOwner, flattenForms: true);
             while (scanner.Advance())
             {
@@ -3793,7 +4430,7 @@ internal sealed partial class PdfModelBuilder
                 // Save/restore overprint state on q/Q (all levels including forms)
                 if (scanner.CurrentOperator == PdfOperatorType.q)
                 {
-                    overprintStack.Push((currentOP, currentOp, currentOPM));
+                    overprintStack.Push((currentOP, currentOp, currentOPM, pendingStrokeIccCmyk, pendingFillIccCmyk));
                 }
                 else if (scanner.CurrentOperator == PdfOperatorType.Q)
                 {
@@ -3803,6 +4440,8 @@ internal sealed partial class PdfModelBuilder
                         currentOP = saved.OP;
                         currentOp = saved.op;
                         currentOPM = saved.OPM;
+                        pendingStrokeIccCmyk = saved.strokeCmyk;
+                        pendingFillIccCmyk = saved.fillCmyk;
                     }
                 }
 
@@ -3819,6 +4458,23 @@ internal sealed partial class PdfModelBuilder
                     else if (scanner.CurrentOperator == PdfOperatorType.Q)
                     {
                         if (gsNestingLevel > 0) gsNestingLevel--;
+                    }
+                }
+
+                // Detect undefined operators (Op_Undefined) — operators not in standard PDF spec
+                if (!Enum.IsDefined(scanner.CurrentOperator))
+                {
+                    // Extract operator name from raw scanner data
+                    var data = scanner.Scanner.Data;
+                    var startAt = scanner.Scanner.CurrentInfo.StartAt;
+                    int nameEnd = startAt;
+                    while (nameEnd < data.Length && data[nameEnd] > 32 && data[nameEnd] < 127)
+                        nameEnd++;
+                    if (nameEnd > startAt)
+                    {
+                        var opUndef = new GenericModelObject("Op_Undefined");
+                        opUndef.Set("name", System.Text.Encoding.ASCII.GetString(data.Slice(startAt, nameEnd - startAt)));
+                        result.Add(opUndef);
                     }
                 }
 
@@ -3840,6 +4496,30 @@ internal sealed partial class PdfModelBuilder
                         PdfOperatorType.b or PdfOperatorType.b_Star;
                 }
 
+                // Emit deferred PDICCBasedCMYK on actual painting operations
+                if (scanner.CurrentOperator is PdfOperatorType.S or PdfOperatorType.s or
+                    PdfOperatorType.B or PdfOperatorType.B_Star or PdfOperatorType.b or PdfOperatorType.b_Star)
+                {
+                    if (pendingStrokeIccCmyk is not null) { result.Add(pendingStrokeIccCmyk); pendingStrokeIccCmyk = null; }
+                }
+                if (scanner.CurrentOperator is PdfOperatorType.f or PdfOperatorType.F or PdfOperatorType.f_Star or
+                    PdfOperatorType.B or PdfOperatorType.B_Star or PdfOperatorType.b or PdfOperatorType.b_Star)
+                {
+                    if (pendingFillIccCmyk is not null) { result.Add(pendingFillIccCmyk); pendingFillIccCmyk = null; }
+                }
+                if (scanner.CurrentOperator is PdfOperatorType.Tj or PdfOperatorType.TJ or
+                    PdfOperatorType.singlequote or PdfOperatorType.doublequote)
+                {
+                    if (pendingFillIccCmyk is not null) { result.Add(pendingFillIccCmyk); pendingFillIccCmyk = null; }
+                    if (pendingStrokeIccCmyk is not null) { result.Add(pendingStrokeIccCmyk); pendingStrokeIccCmyk = null; }
+                }
+
+                // Clear pending ICCBased CMYK when colour space changes
+                if (scanner.CurrentOperator is PdfOperatorType.RG or PdfOperatorType.G or PdfOperatorType.K or PdfOperatorType.CS)
+                    pendingStrokeIccCmyk = null;
+                if (scanner.CurrentOperator is PdfOperatorType.rg or PdfOperatorType.g or PdfOperatorType.k or PdfOperatorType.cs)
+                    pendingFillIccCmyk = null;
+
                 // Also check inline images for device colour space usage and filters
                 if (csName is null && scanner.CurrentOperator == PdfOperatorType.EI)
                 {
@@ -3850,6 +4530,9 @@ internal sealed partial class PdfModelBuilder
 
                         // Extract CosRenderingIntent from inline image /Intent entry
                         ExtractInlineImageIntent(inlineImg.header, result);
+
+                        // Create PDInlineImage object with Interpolate property
+                        var inlineImgObj = CreatePDInlineImage(inlineImg.header, result);
 
                         // Resolve with form-level resources when inside a form XObject
                         var imgResources = resources;
@@ -3924,7 +4607,11 @@ internal sealed partial class PdfModelBuilder
                                             iccCmyk.Set("currentTransparencyProfileIndirect", transparencyIccIndirect);
                                         if (transparencyIccMD5 is not null)
                                             iccCmyk.Set("currentTransparencyICCProfileMD5", transparencyIccMD5);
-                                        result.Add(iccCmyk);
+                                        // Defer emission until actual painting operation uses this CS
+                                        if (scanner.CurrentOperator == PdfOperatorType.CS)
+                                            pendingStrokeIccCmyk = iccCmyk;
+                                        else
+                                            pendingFillIccCmyk = iccCmyk;
                                     }
                                 }
                             }
@@ -4010,7 +4697,8 @@ internal sealed partial class PdfModelBuilder
 
     private void CreateColorSpaceObjectFromRef(IPdfObject? csRef, PdfDictionary resources, List<IModelObject> result,
         string? documentOutputCS, string? pageOutputCS, string? transparencyCS,
-        string? transparencyIccIndirect = null, string? transparencyIccMD5 = null)
+        string? transparencyIccIndirect = null, string? transparencyIccMD5 = null,
+        bool emitICCBasedCMYK = true)
     {
         if (csRef is null) return;
         var resolved = csRef.Resolve();
@@ -4055,7 +4743,7 @@ internal sealed partial class PdfModelBuilder
 
                         // Check if this is an ICCBased CMYK (N==4)
                         var n = GetNumberValue(iccStream.Dictionary.Get(new PdfName("N")));
-                        if (n is not null && (int)n.Value == 4)
+                        if (emitICCBasedCMYK && n is not null && (int)n.Value == 4)
                         {
                             var iccCmyk = new GenericModelObject("PDICCBasedCMYK");
                             iccCmyk.Set("N", n);
@@ -4189,6 +4877,16 @@ internal sealed partial class PdfModelBuilder
                         // Recurse into the alternate CS — it may be a device CS
                         if (csArray.Count > 2)
                             CreateColorSpaceObjectFromRef(csArray[2], resources, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                        // Recurse into Colorants dictionary entries — each is a colour space
+                        // that may be Separation (tracked for areTintAndAlternateConsistent)
+                        if (csArray.Count > 4 && csArray[4].Resolve() is PdfDictionary devNAttrs2)
+                        {
+                            if (devNAttrs2.TryGetValue<PdfDictionary>(new PdfName("Colorants"), out var colorantsDict2))
+                            {
+                                foreach (var (_, csVal) in colorantsDict2)
+                                    CreateColorSpaceObjectFromRef(csVal, resources, result, documentOutputCS, pageOutputCS, transparencyCS, transparencyIccIndirect, transparencyIccMD5);
+                            }
+                        }
                     }
                     break;
                 case "Indexed":
@@ -6192,7 +6890,7 @@ internal sealed class PdfByteAnalysis
         var headerLine = headerOffset >= 0
             ? ReadLine(bytes, headerOffset)
             : string.Empty;
-        var secondLineStart = headerOffset >= 0 ? SkipLine(bytes, headerOffset) : -1;
+        var secondLineStart = headerOffset >= 0 ? SkipSingleEol(bytes, headerOffset) : -1;
         var binaryCommentBytes = secondLineStart >= 0 && secondLineStart < bytes.Length && bytes[secondLineStart] == (byte)'%'
             ? bytes.Skip(secondLineStart + 1).Take(4).ToArray()
             : Array.Empty<byte>();
@@ -6421,6 +7119,35 @@ internal sealed class PdfByteAnalysis
         return index;
     }
 
+    /// <summary>
+    /// Skips the non-EOL content of the current line, then skips exactly one EOL marker (CR, LF, or CRLF).
+    /// Returns the position immediately after that single EOL marker.
+    /// </summary>
+    private static int SkipSingleEol(byte[] bytes, int start)
+    {
+        var index = start;
+        // Skip non-EOL characters (the line content)
+        while (index < bytes.Length && bytes[index] is not ((byte)'\r' or (byte)'\n'))
+        {
+            index++;
+        }
+        // Skip exactly one EOL marker: CR, LF, or CRLF
+        if (index < bytes.Length)
+        {
+            if (bytes[index] == (byte)'\r')
+            {
+                index++;
+                if (index < bytes.Length && bytes[index] == (byte)'\n')
+                    index++; // CRLF
+            }
+            else if (bytes[index] == (byte)'\n')
+            {
+                index++;
+            }
+        }
+        return index;
+    }
+
     private static int CountNonEolTrailing(byte[] bytes, int start)
     {
         var index = start;
@@ -6509,6 +7236,137 @@ internal static class PdfObjectStructuralComparer
         catch
         {
             return false;
+        }
+    }
+}
+
+/// <summary>
+/// Scans raw PDF bytes for hex strings and indexes their validation properties.
+/// Used to populate CosString isHex/containsOnlyHex/hexCount from the original source data.
+/// </summary>
+internal sealed class HexStringIndex
+{
+    internal readonly record struct HexInfo(bool ContainsOnlyHex, int HexCount);
+
+    // Maps decoded hex string value → hex info.
+    // If the same value appears multiple times with different properties, keep the first one found.
+    private readonly Dictionary<string, HexInfo> _index;
+
+    private HexStringIndex(Dictionary<string, HexInfo> index) => _index = index;
+
+    public bool TryLookup(string decodedValue, out HexInfo info) => _index.TryGetValue(decodedValue, out info);
+
+    public IEnumerable<KeyValuePair<string, HexInfo>> AllEntries => _index;
+
+    public static HexStringIndex Build(byte[] rawBytes)
+    {
+        var index = new Dictionary<string, HexInfo>(StringComparer.Ordinal);
+
+        for (int i = 0; i < rawBytes.Length; i++)
+        {
+            if (rawBytes[i] != (byte)'<')
+                continue;
+
+            // Skip << (dictionary start)
+            if (i + 1 < rawBytes.Length && rawBytes[i + 1] == (byte)'<')
+            {
+                i++; // skip both <
+                continue;
+            }
+
+            // Parse hex string content until >
+            int start = i + 1;
+            int hexCount = 0;
+            bool containsOnlyHex = true;
+
+            int j = start;
+            for (; j < rawBytes.Length; j++)
+            {
+                var b = rawBytes[j];
+                if (b == (byte)'>')
+                    break;
+
+                // Skip whitespace
+                if (b == 0x00 || b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D || b == 0x20)
+                    continue;
+
+                hexCount++;
+                if (!IsHexChar(b))
+                    containsOnlyHex = false;
+            }
+
+            if (j >= rawBytes.Length)
+                break; // unterminated hex string
+
+            // Decode the hex string to get the value for matching
+            var decoded = DecodeHexString(rawBytes, start, j);
+            if (decoded is not null && !index.ContainsKey(decoded))
+            {
+                index[decoded] = new HexInfo(containsOnlyHex, hexCount);
+            }
+
+            i = j; // advance past >
+        }
+
+        return new HexStringIndex(index);
+    }
+
+    private static bool IsHexChar(byte b) =>
+        (b >= (byte)'0' && b <= (byte)'9') ||
+        (b >= (byte)'A' && b <= (byte)'F') ||
+        (b >= (byte)'a' && b <= (byte)'f');
+
+    private static int HexVal(byte b) =>
+        b >= (byte)'0' && b <= (byte)'9' ? b - (byte)'0' :
+        b >= (byte)'A' && b <= (byte)'F' ? b - (byte)'A' + 10 :
+        b >= (byte)'a' && b <= (byte)'f' ? b - (byte)'a' + 10 : 0;
+
+    private static string? DecodeHexString(byte[] raw, int start, int end)
+    {
+        var bytes = new List<byte>();
+        bool highNibble = true;
+        byte current = 0;
+
+        for (int i = start; i < end; i++)
+        {
+            var b = raw[i];
+            // Skip whitespace
+            if (b == 0x00 || b == 0x09 || b == 0x0A || b == 0x0C || b == 0x0D || b == 0x20)
+                continue;
+
+            if (!IsHexChar(b))
+                continue; // skip invalid chars for decoding (same as PdfLexer)
+
+            if (highNibble)
+            {
+                current = (byte)(HexVal(b) << 4);
+                highNibble = false;
+            }
+            else
+            {
+                current |= (byte)HexVal(b);
+                bytes.Add(current);
+                current = 0;
+                highNibble = true;
+            }
+        }
+
+        // Odd number of digits: pad last with 0
+        if (!highNibble)
+        {
+            bytes.Add(current);
+        }
+
+        try
+        {
+            // Try to match PdfLexer's decoding: check for BOM, then use ISO 8859-1
+            if (bytes.Count >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+                return System.Text.Encoding.BigEndianUnicode.GetString(bytes.ToArray(), 2, bytes.Count - 2);
+            return System.Text.Encoding.GetEncoding("iso-8859-1").GetString(bytes.ToArray());
+        }
+        catch
+        {
+            return null;
         }
     }
 }
