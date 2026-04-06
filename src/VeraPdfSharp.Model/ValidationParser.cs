@@ -365,6 +365,8 @@ internal sealed partial class PdfModelBuilder
     private readonly HashSet<PdfDictionary> _allFontDicts = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, FontProgramInfo?> _fontProgramCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, GenericModelObject?> _trueTypeFontProgramObjects = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
+    private readonly Dictionary<PdfDictionary, CffWidthInfo?> _cffWidthCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
+    private readonly Dictionary<PdfDictionary, Dictionary<string, double>?> _type3WidthCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, TableInfo> _tableInfoCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, TableCellInfo> _tableCellInfoCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
     private readonly Dictionary<PdfDictionary, HeadingInfo> _headingInfoCache = new(ReferenceEqualityComparer<PdfDictionary>.Instance);
@@ -1976,6 +1978,13 @@ internal sealed partial class PdfModelBuilder
             model.Link("contentHexStrings", contentHexStrings.ToArray());
         }
 
+        // Scan content stream for ri operators → CosRenderingIntent
+        var riIntents = ScanContentStreamRenderingIntents(page);
+        if (riIntents.Count > 0)
+        {
+            model.Link("contentRenderingIntents", riIntents.ToArray());
+        }
+
         // Emit CosLang for page-level Lang entry
         var pageLang = ConvertPdfObjectToString(page.Get(LangName));
         if (!string.IsNullOrEmpty(pageLang))
@@ -2194,6 +2203,33 @@ internal sealed partial class PdfModelBuilder
                 {
                     if (item.Resolve() is PdfStream s)
                         ScanDecompressedBytesForPrimitives(s.Contents.GetDecodedData(), result);
+                }
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    /// <summary>
+    /// Scan page content streams for ri (set rendering intent) operators and create
+    /// CosRenderingIntent objects for each occurrence.
+    /// </summary>
+    private List<IModelObject> ScanContentStreamRenderingIntents(PdfDictionary page)
+    {
+        var result = new List<IModelObject>();
+        try
+        {
+            var scanner = new PageContentScanner(ParsingContext.Current, page, flattenForms: true);
+            while (scanner.Advance())
+            {
+                if (scanner.CurrentOperator == PdfOperatorType.ri)
+                {
+                    if (scanner.TryGetCurrentOperation<double>(out var op) && op is ri_Op<double> riOp)
+                    {
+                        var intentObj = new GenericModelObject("CosRenderingIntent");
+                        intentObj.Set("internalRepresentation", riOp.intent.Value);
+                        result.Add(intentObj);
+                    }
                 }
             }
         }
@@ -2755,6 +2791,12 @@ internal sealed partial class PdfModelBuilder
                 if (validationFont is not null)
                 {
                     RegisterFontUsage(validationFont, glyph, segment.GraphicsState.TextMode);
+                    // For composite (Type0) fonts, also register usage against the parent
+                    // Type0 font dict so it doesn't get marked as PDUnusedFont.
+                    if (font is not null && !ReferenceEquals(font, validationFont))
+                    {
+                        RegisterFontUsage(font, glyph, segment.GraphicsState.TextMode);
+                    }
                     LinkTrueTypeFontProgram(validationFont);
                 }
 
@@ -2762,7 +2804,7 @@ internal sealed partial class PdfModelBuilder
                 model.Set("name", glyph.Name ?? (glyph.Undefined ? ".notdef" : null));
                 model.Set("renderingMode", segment.GraphicsState.TextMode);
                 model.Set("isGlyphPresent", GetGlyphPresence(font, glyph));
-                model.Set("widthFromDictionary", glyph.w0 == 0 && glyph.Undefined ? null : glyph.w0 * 1000d);
+                model.Set("widthFromDictionary", GetWidthFromDictionary(font, glyph));
                 model.Set("widthFromFontProgram", GetWidthFromFontProgram(font, glyph));
                 var unicode = GetGlyphUnicode(glyph);
                 // veraPDF's standard AGL does not include TeX-specific glyph names.
@@ -3148,10 +3190,9 @@ internal sealed partial class PdfModelBuilder
             else
             {
                 // Font declared in Resources but never used in content.
-                // veraPDF wouldn't create a validation object for unused fonts.
-                // Retype to a non-validated type so specific-type rules don't match,
-                // and set renderingMode=3 so supertype-matched rules (PDFont) also pass.
-                fontObj.ObjectType = "PDUnusedFont";
+                // Set renderingMode=3 so the embedding rule (6.2.11.4.1) doesn't
+                // penalise truly unused fonts. Keep the proper font type so
+                // structural rules (Type, Subtype, BaseFont, etc.) still fire.
                 fontObj.Set("renderingMode", 3);
             }
         }
@@ -3210,7 +3251,7 @@ internal sealed partial class PdfModelBuilder
         model.Set("CIDFontOrdering", ConvertPdfObjectToString(cidSystemInfo?.Get(PdfName.Ordering)));
         model.Set("CIDFontRegistry", ConvertPdfObjectToString(cidSystemInfo?.Get(PdfName.Registry)));
         model.Set("CIDFontSupplement", ConvertPdfObjectToScalar(cidSystemInfo?.Get(new PdfName("Supplement"))));
-        model.Set("CIDToGIDMap", ConvertPdfObjectToString((descendantFont ?? font).Get(PdfName.CIDToGIDMap)));
+        model.Set("CIDToGIDMap", GetCIDToGIDMapValue((descendantFont ?? font).Get(PdfName.CIDToGIDMap)));
 
         // CMap-side CIDSystemInfo (from Encoding stream, if it's an embedded CMap)
         var cmapStream = encoding?.Resolve() as PdfStream;
@@ -3226,8 +3267,156 @@ internal sealed partial class PdfModelBuilder
             model.Set("isSymbolic", (flagValue & 4) == 4);
         }
 
+        // Create CMapFile and PDReferencedCMap for composite fonts with embedded CMaps
+        if (cmapStream is not null)
+        {
+            LinkCMapFileObjects(model, cmapStream);
+        }
+
         LinkTrueTypeFontProgram(font);
         UpdateFontCoverageProperties(font);
+    }
+
+    private void LinkCMapFileObjects(GenericModelObject fontModel, PdfStream cmapStream)
+    {
+        byte[] cmapData;
+        try
+        {
+            cmapData = cmapStream.Contents.GetDecodedData();
+        }
+        catch
+        {
+            return;
+        }
+
+        var parsed = ParseCMapProgram(cmapData);
+
+        // Also check stream dictionary for /UseCMap entry
+        var useCMapEntry = cmapStream.Dictionary.Get(new PdfName("UseCMap"));
+        if (useCMapEntry is not null)
+        {
+            var resolved = useCMapEntry.Resolve();
+            if (resolved is PdfName useCMapName)
+            {
+                parsed.UseCMapName = useCMapName.Value;
+            }
+            else if (resolved is PdfStream useCMapStream)
+            {
+                // Embedded referenced CMap - extract its CMapName
+                try
+                {
+                    var refData = useCMapStream.Contents.GetDecodedData();
+                    var refText = System.Text.Encoding.ASCII.GetString(refData);
+                    var nameMatch = System.Text.RegularExpressions.Regex.Match(refText, @"/CMapName\s+/(\S+)");
+                    if (nameMatch.Success)
+                    {
+                        parsed.UseCMapName = nameMatch.Groups[1].Value;
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // Create PDCMap intermediate object
+        var cmapObj = new GenericModelObject("PDCMap");
+        cmapObj.Set("CMapName", parsed.CMapName);
+        cmapObj.Set("containsEmbeddedFile", true);
+
+        // Create CMapFile object
+        var cmapFileObj = new GenericModelObject("CMapFile");
+        cmapFileObj.Set("WMode", parsed.WMode);
+        var dictWMode = cmapStream.Dictionary.GetOptionalValue<PdfNumber>(new PdfName("WMode"));
+        cmapFileObj.Set("dictWMode", dictWMode is not null ? (int)(double)dictWMode : 0);
+        cmapFileObj.Set("maximalCID", parsed.MaximalCID);
+        cmapObj.Link("embeddedFile", cmapFileObj);
+
+        // Create PDReferencedCMap if UseCMap is present
+        if (parsed.UseCMapName is not null)
+        {
+            var refCMapObj = new GenericModelObject("PDReferencedCMap", superTypes: new[] { "PDCMap" });
+            refCMapObj.Set("CMapName", parsed.UseCMapName);
+            cmapObj.Link("UseCMap", refCMapObj);
+        }
+
+        fontModel.Link("Encoding", cmapObj);
+    }
+
+    private static CMapParsedInfo ParseCMapProgram(byte[] data)
+    {
+        var text = System.Text.Encoding.ASCII.GetString(data);
+        var result = new CMapParsedInfo();
+
+        // Extract /CMapName /<name> def
+        var cmapNameMatch = System.Text.RegularExpressions.Regex.Match(text, @"/CMapName\s+/(\S+)");
+        if (cmapNameMatch.Success)
+        {
+            result.CMapName = cmapNameMatch.Groups[1].Value;
+        }
+
+        // Extract /WMode <value> def
+        var wmodeMatch = System.Text.RegularExpressions.Regex.Match(text, @"/WMode\s+(\d+)");
+        if (wmodeMatch.Success && int.TryParse(wmodeMatch.Groups[1].Value, out var wmode))
+        {
+            result.WMode = wmode;
+        }
+
+        // Extract UseCMap reference: /<name> usecmap (case-insensitive)
+        var useCMapMatch = System.Text.RegularExpressions.Regex.Match(text, @"/(\S+)\s+usecmap", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (useCMapMatch.Success)
+        {
+            result.UseCMapName = useCMapMatch.Groups[1].Value;
+        }
+
+        // Parse maximal CID from cidchar and cidrange sections
+        result.MaximalCID = ParseMaximalCID(text);
+
+        return result;
+    }
+
+    private static int ParseMaximalCID(string text)
+    {
+        int maxCID = 0;
+
+        // Parse begincidchar sections: <srcCode> CID
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+            text, @"begincidchar\s*(.*?)\s*endcidchar", System.Text.RegularExpressions.RegexOptions.Singleline))
+        {
+            foreach (System.Text.RegularExpressions.Match cidMatch in System.Text.RegularExpressions.Regex.Matches(
+                m.Groups[1].Value, @"<[0-9a-fA-F]+>\s+(\d+)"))
+            {
+                if (int.TryParse(cidMatch.Groups[1].Value, out var cid) && cid > maxCID)
+                {
+                    maxCID = cid;
+                }
+            }
+        }
+
+        // Parse begincidrange sections: <start> <end> CID
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+            text, @"begincidrange\s*(.*?)\s*endcidrange", System.Text.RegularExpressions.RegexOptions.Singleline))
+        {
+            foreach (System.Text.RegularExpressions.Match rangeMatch in System.Text.RegularExpressions.Regex.Matches(
+                m.Groups[1].Value, @"<([0-9a-fA-F]+)>\s+<([0-9a-fA-F]+)>\s+(\d+)"))
+            {
+                var startCode = Convert.ToInt32(rangeMatch.Groups[1].Value, 16);
+                var endCode = Convert.ToInt32(rangeMatch.Groups[2].Value, 16);
+                if (int.TryParse(rangeMatch.Groups[3].Value, out var baseCID))
+                {
+                    var rangeMax = baseCID + (endCode - startCode);
+                    if (rangeMax > maxCID) maxCID = rangeMax;
+                }
+            }
+        }
+
+        return maxCID;
+    }
+
+    private sealed class CMapParsedInfo
+    {
+        public string? CMapName { get; set; }
+        public int WMode { get; set; }
+        public string? UseCMapName { get; set; }
+        public int MaximalCID { get; set; }
     }
 
     private void RegisterFontUsage(PdfDictionary font, Glyph glyph, int renderingMode)
@@ -3434,6 +3623,770 @@ internal sealed partial class PdfModelBuilder
         return (bytes[offset] << 8) | bytes[offset + 1];
     }
 
+    // ── CFF width extraction ─────────────────────────────────────────
+
+    private sealed record CffWidthInfo(
+        IReadOnlyDictionary<string, double> WidthByName,
+        IReadOnlyDictionary<uint, double> WidthByCid);
+
+    private CffWidthInfo? GetCffWidthInfo(PdfDictionary font)
+    {
+        if (_cffWidthCache.TryGetValue(font, out var cached))
+            return cached;
+
+        try
+        {
+            var descriptor = font.GetOptionalValue<PdfDictionary>(PdfName.FontDescriptor);
+            var fontFile3 = descriptor?.GetOptionalValue<PdfStream>(new PdfName("FontFile3"));
+            if (fontFile3 is null)
+            {
+                _cffWidthCache[font] = null;
+                return null;
+            }
+
+            var data = fontFile3.Contents.GetDecodedData();
+            if (!IsCffData(data))
+            {
+                _cffWidthCache[font] = null;
+                return null;
+            }
+
+            var widthByName = new Dictionary<string, double>(StringComparer.Ordinal);
+            var widthByCid = new Dictionary<uint, double>();
+            ParseCffWidths(data, widthByName, widthByCid);
+
+            var info = new CffWidthInfo(widthByName, widthByCid);
+            _cffWidthCache[font] = info;
+            return info;
+        }
+        catch
+        {
+            _cffWidthCache[font] = null;
+            return null;
+        }
+    }
+
+    private static bool IsCffData(byte[] data) =>
+        data.Length >= 4 && data[0] >= 1 && data[3] >= 1 && data[3] <= 4;
+
+    private static void ParseCffWidths(byte[] data, Dictionary<string, double> widthByName, Dictionary<uint, double> widthByCid)
+    {
+        var pos = 0;
+
+        // Header
+        if (data.Length < 4) return;
+        var hdrSize = data[2];
+        pos = hdrSize;
+
+        // Name INDEX
+        var nameIndex = CffReadIndex(data, ref pos);
+        // Top DICT INDEX
+        var topDictIndex = CffReadIndex(data, ref pos);
+        // String INDEX
+        var stringIndex = CffReadIndex(data, ref pos);
+        // Global Subr INDEX
+        CffReadIndex(data, ref pos);
+
+        if (topDictIndex.Count == 0) return;
+
+        // Parse first font's top dict
+        var topDict = CffParseDict(data, topDictIndex[0].offset, topDictIndex[0].length);
+
+        var charStringsOffset = CffGetIntOperand(topDict, 17);
+        var charSetOffset = CffGetIntOperand(topDict, 15);
+        var privateInfo = CffGetPrivateInfo(topDict);
+
+        if (charStringsOffset <= 0) return;
+
+        // Parse CharStrings INDEX
+        var csPos = charStringsOffset;
+        var charStrings = CffReadIndex(data, ref csPos);
+
+        // Parse Private DICT for defaultWidthX and nominalWidthX
+        double defaultWidthX = 0;
+        double nominalWidthX = 0;
+
+        // Check for CID font (FDArray present)
+        var fdArrayOffset = CffGetIntOperand(topDict, (12 << 8) | 36);
+        var fdSelectOffset = CffGetIntOperand(topDict, (12 << 8) | 37);
+        var isCid = fdArrayOffset > 0 && fdSelectOffset > 0;
+
+        // For CID fonts, parse FDArray and FDSelect
+        double[]? fdDefaultWidths = null;
+        double[]? fdNominalWidths = null;
+        int[]? fdSelectMap = null;
+        double[]? fdWidthScales = null;
+
+        // Parse top-level FontMatrix (operator 12 7, key 3079)
+        // Default is [0.001, 0, 0, 0.001, 0, 0]
+        var fontMatrixKey = (12 << 8) | 7;
+        double[]? topFontMatrix = null;
+        foreach (var e in topDict)
+        {
+            if (e.key == fontMatrixKey && e.values.Length >= 6)
+            {
+                topFontMatrix = e.values;
+                break;
+            }
+        }
+
+        // DEBUG: print top dict info
+        {
+            var topStr = topFontMatrix is null ? "null" : $"[{string.Join(",", topFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
+            Console.Error.WriteLine($"[CFF-TOP] isCid={isCid} topFM={topStr} fdArrayOff={fdArrayOffset} fdSelOff={fdSelectOffset} charStringsCount={charStringsOffset}");
+            // Also dump all top dict keys
+            Console.Error.WriteLine($"[CFF-TOP-KEYS] {string.Join(", ", topDict.Select(e => $"op={e.key}(vals={e.values.Length})"))}");
+        }
+
+        if (isCid)
+        {
+            var fdPos = fdArrayOffset;
+            var fdArray = CffReadIndex(data, ref fdPos);
+            fdDefaultWidths = new double[fdArray.Count];
+            fdNominalWidths = new double[fdArray.Count];
+            fdWidthScales = new double[fdArray.Count];
+
+            for (var i = 0; i < fdArray.Count; i++)
+            {
+                var fdDict = CffParseDict(data, fdArray[i].offset, fdArray[i].length);
+                var fdPrivate = CffGetPrivateInfo(fdDict);
+                if (fdPrivate.size > 0)
+                {
+                    var priv = CffParseDict(data, fdPrivate.offset, fdPrivate.size);
+                    fdDefaultWidths[i] = CffGetRealOperand(priv, 20);
+                    fdNominalWidths[i] = CffGetRealOperand(priv, 21);
+                }
+
+                // Parse per-FD FontMatrix and compute effective scaling
+                double[]? perFdFontMatrix = null;
+                foreach (var e in fdDict)
+                {
+                    if (e.key == fontMatrixKey && e.values.Length >= 6)
+                    {
+                        perFdFontMatrix = e.values;
+                        break;
+                    }
+                }
+
+                // Calculate effective FontMatrix: topFM × perFdFM (or whichever is available)
+                var effectiveFm = CffCalculateEffectiveMatrix(topFontMatrix, perFdFontMatrix);
+                fdWidthScales[i] = CffIsDefaultFontMatrix(effectiveFm) ? 1.0 : effectiveFm[0] * 1000.0;
+
+                // DEBUG: output per-FD matrix info
+                var topStr = topFontMatrix is null ? "null" : $"[{string.Join(",", topFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
+                var perStr = perFdFontMatrix is null ? "null" : $"[{string.Join(",", perFdFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
+                var effStr = $"[{string.Join(",", effectiveFm.Take(6).Select(v => v.ToString("G")))}]";
+                Console.Error.WriteLine($"[CFF-DEBUG] FD[{i}]: topFM={topStr} perFdFM={perStr} effectiveFM={effStr} scale={fdWidthScales[i]:G}");
+            }
+
+            // Parse FDSelect
+            fdSelectMap = CffParseFdSelect(data, fdSelectOffset, charStrings.Count);
+        }
+        else if (privateInfo.size > 0 && privateInfo.offset + privateInfo.size <= data.Length)
+        {
+            var priv = CffParseDict(data, privateInfo.offset, privateInfo.size);
+            defaultWidthX = CffGetRealOperand(priv, 20);
+            nominalWidthX = CffGetRealOperand(priv, 21);
+        }
+
+        // Parse charset to get glyph names or CIDs
+        var charsetEntries = CffParseCharSet(data, charSetOffset, charStrings.Count, isCid, stringIndex);
+
+        // Non-CID font width scale from top FontMatrix
+        var nonCidWidthScale = 1.0;
+        if (!isCid && topFontMatrix is not null && !CffIsDefaultFontMatrix(topFontMatrix))
+            nonCidWidthScale = topFontMatrix[0] * 1000.0;
+
+        // Extract width from each charstring
+        for (var i = 0; i < charStrings.Count; i++)
+        {
+            var defW = defaultWidthX;
+            var nomW = nominalWidthX;
+            var widthScale = nonCidWidthScale;
+            if (isCid && fdSelectMap is not null && fdDefaultWidths is not null && fdNominalWidths is not null && fdWidthScales is not null)
+            {
+                var fdIdx = i < fdSelectMap.Length ? fdSelectMap[i] : 0;
+                if (fdIdx >= 0 && fdIdx < fdDefaultWidths.Length)
+                {
+                    defW = fdDefaultWidths[fdIdx];
+                    nomW = fdNominalWidths[fdIdx];
+                    widthScale = fdWidthScales[fdIdx];
+                }
+            }
+
+            var width = CffExtractCharstringWidth(data, charStrings[i].offset, charStrings[i].length, defW, nomW);
+            width *= widthScale; // Convert from CFF internal units to 1000 units/em
+
+            if (i == 0)
+            {
+                // GID 0 is .notdef
+                if (isCid) widthByCid[0] = width;
+                else widthByName[".notdef"] = width;
+                continue;
+            }
+
+            if (i - 1 < charsetEntries.Count)
+            {
+                var entry = charsetEntries[i - 1];
+                if (isCid)
+                {
+                    widthByCid[(uint)entry.sid] = width;
+                }
+                else if (entry.name is not null)
+                {
+                    widthByName[entry.name] = width;
+                }
+            }
+        }
+    }
+
+    private readonly record struct CffIndexEntry(int offset, int length);
+
+    private static List<CffIndexEntry> CffReadIndex(byte[] data, ref int pos)
+    {
+        var result = new List<CffIndexEntry>();
+        if (pos + 2 > data.Length) return result;
+
+        var count = (data[pos] << 8) | data[pos + 1];
+        pos += 2;
+        if (count == 0) return result;
+
+        var offSize = data[pos++];
+        var offsets = new int[count + 1];
+        for (var i = 0; i <= count; i++)
+        {
+            var val = 0;
+            for (var j = 0; j < offSize; j++)
+                val = (val << 8) | data[pos++];
+            offsets[i] = val;
+        }
+
+        var dataStart = pos - 1; // offsets are 1-based
+        for (var i = 0; i < count; i++)
+        {
+            result.Add(new CffIndexEntry(dataStart + offsets[i], offsets[i + 1] - offsets[i]));
+        }
+
+        pos = dataStart + offsets[count];
+        return result;
+    }
+
+    private readonly record struct CffDictEntry(int key, double[] values);
+
+    private static List<CffDictEntry> CffParseDict(byte[] data, int offset, int length)
+    {
+        var entries = new List<CffDictEntry>();
+        var operands = new List<double>();
+        var pos = offset;
+        var end = offset + length;
+
+        while (pos < end && pos < data.Length)
+        {
+            int b = data[pos];
+            if (b <= 21)
+            {
+                int key = b;
+                if (b == 12 && pos + 1 < end)
+                {
+                    pos++;
+                    key = (12 << 8) | data[pos];
+                }
+                entries.Add(new CffDictEntry(key, operands.ToArray()));
+                operands.Clear();
+                pos++;
+            }
+            else
+            {
+                operands.Add(CffParseOperand(data, ref pos));
+            }
+        }
+
+        return entries;
+    }
+
+    private static double CffParseOperand(byte[] data, ref int pos)
+    {
+        int b = data[pos++];
+        if (b == 30)
+        {
+            // Real number
+            var sb = new System.Text.StringBuilder();
+            var nibbleChars = "0123456789.EE -";
+            while (pos < data.Length)
+            {
+                int b2 = data[pos++];
+                var n1 = b2 >> 4;
+                var n2 = b2 & 0xF;
+                if (n1 == 0xF) break;
+                sb.Append(nibbleChars[n1]);
+                if (n2 == 0xF) break;
+                sb.Append(nibbleChars[n2]);
+            }
+            return double.TryParse(sb.ToString(), System.Globalization.NumberStyles.Float,
+                       System.Globalization.CultureInfo.InvariantCulture, out var val) ? val : 0;
+        }
+        if (b == 28)
+        {
+            var v = (data[pos] << 8) | data[pos + 1];
+            pos += 2;
+            return (short)v;
+        }
+        if (b == 29)
+        {
+            var v = (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3];
+            pos += 4;
+            return v;
+        }
+        if (b >= 32 && b <= 246)
+            return b - 139;
+        if (b >= 247 && b <= 250)
+            return (b - 247) * 256 + data[pos++] + 108;
+        if (b >= 251 && b <= 254)
+            return -((b - 251) * 256) - data[pos++] - 108;
+        return 0;
+    }
+
+    private static int CffGetIntOperand(List<CffDictEntry> dict, int key)
+    {
+        foreach (var e in dict)
+            if (e.key == key && e.values.Length > 0)
+                return (int)e.values[0];
+        return 0;
+    }
+
+    private static double CffGetRealOperand(List<CffDictEntry> dict, int key)
+    {
+        foreach (var e in dict)
+            if (e.key == key && e.values.Length > 0)
+                return e.values[0];
+        return 0;
+    }
+
+    private static (int size, int offset) CffGetPrivateInfo(List<CffDictEntry> dict)
+    {
+        foreach (var e in dict)
+            if (e.key == 18 && e.values.Length >= 2)
+                return ((int)e.values[0], (int)e.values[1]);
+        return (0, 0);
+    }
+
+    private static bool CffIsDefaultFontMatrix(double[]? fm) =>
+        fm is null ||
+        (Math.Abs(fm[0] - 0.001) < 1e-10 && Math.Abs(fm[1]) < 1e-10 &&
+         Math.Abs(fm[2]) < 1e-10 && Math.Abs(fm[3] - 0.001) < 1e-10 &&
+         Math.Abs(fm[4]) < 1e-10 && Math.Abs(fm[5]) < 1e-10);
+
+    private static double[] CffCalculateEffectiveMatrix(double[]? topFm, double[]? perFdFm)
+    {
+        var defaultFm = new[] { 0.001, 0.0, 0.0, 0.001, 0.0, 0.0 };
+        if (topFm is not null && perFdFm is not null)
+        {
+            // Matrix multiply: top × perFd (for 2D affine transform [a b 0; c d 0; e f 1])
+            return
+            [
+                topFm[0] * perFdFm[0] + topFm[1] * perFdFm[2],
+                topFm[0] * perFdFm[1] + topFm[1] * perFdFm[3],
+                topFm[2] * perFdFm[0] + topFm[3] * perFdFm[2],
+                topFm[2] * perFdFm[1] + topFm[3] * perFdFm[3],
+                topFm[4] * perFdFm[0] + topFm[5] * perFdFm[2] + perFdFm[4],
+                topFm[4] * perFdFm[1] + topFm[5] * perFdFm[3] + perFdFm[5],
+            ];
+        }
+        if (topFm is not null) return topFm;
+        if (perFdFm is not null) return perFdFm;
+        return defaultFm;
+    }
+
+    private static readonly string[] CffStandardStrings =
+    [
+        ".notdef", "space", "exclam", "quotedbl", "numbersign", "dollar", "percent",
+        "ampersand", "quoteright", "parenleft", "parenright", "asterisk", "plus",
+        "comma", "hyphen", "period", "slash", "zero", "one", "two", "three", "four",
+        "five", "six", "seven", "eight", "nine", "colon", "semicolon", "less",
+        "equal", "greater", "question", "at", "A", "B", "C", "D", "E", "F", "G", "H",
+        "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W",
+        "X", "Y", "Z", "bracketleft", "backslash", "bracketright", "asciicircum",
+        "underscore", "quoteleft", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+        "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y",
+        "z", "braceleft", "bar", "braceright", "asciitilde", "exclamdown", "cent",
+        "sterling", "fraction", "yen", "florin", "section", "currency",
+        "quotesingle", "quotedblleft", "guillemotleft", "guilsinglleft", "guilsinglright",
+        "fi", "fl", "endash", "dagger", "daggerdbl", "periodcentered", "paragraph",
+        "bullet", "quotesinglbase", "quotedblbase", "quotedblright", "guillemotright",
+        "ellipsis", "perthousand", "questiondown", "grave", "acute", "circumflex",
+        "tilde", "macron", "breve", "dotaccent", "dieresis", "ring", "cedilla",
+        "hungarumlaut", "ogonek", "caron", "emdash", "AE", "ordfeminine", "Lslash",
+        "Oslash", "OE", "ordmasculine", "ae", "dotlessi", "lslash", "oslash", "oe",
+        "germandbls", "onesuperior", "logicalnot", "mu", "trademark", "Eth",
+        "onehalf", "plusminus", "Thorn", "onequarter", "divide", "brokenbar", "degree",
+        "thorn", "threequarters", "twosuperior", "registered", "minus", "eth",
+        "multiply", "threesuperior", "copyright", "Aacute", "Acircumflex", "Adieresis",
+        "Agrave", "Aring", "Atilde", "Ccedilla", "Eacute", "Ecircumflex", "Edieresis",
+        "Egrave", "Iacute", "Icircumflex", "Idieresis", "Igrave", "Ntilde", "Oacute",
+        "Ocircumflex", "Odieresis", "Ograve", "Otilde", "Scaron", "Uacute",
+        "Ucircumflex", "Udieresis", "Ugrave", "Yacute", "Ydieresis", "Zcaron",
+        "aacute", "acircumflex", "adieresis", "agrave", "aring", "atilde", "ccedilla",
+        "eacute", "ecircumflex", "edieresis", "egrave", "iacute", "icircumflex",
+        "idieresis", "igrave", "ntilde", "oacute", "ocircumflex", "odieresis", "ograve",
+        "otilde", "scaron", "uacute", "ucircumflex", "udieresis", "ugrave", "yacute",
+        "ydieresis", "zcaron", "exclamsmall", "Hungarumlautsmall", "dollaroldstyle",
+        "dollarsuperior", "ampersandsmall", "Acutesmall", "parenleftsuperior",
+        "parenrightsuperior", "twodotenleader", "onedotenleader", "zerooldstyle",
+        "oneoldstyle", "twooldstyle", "threeoldstyle", "fouroldstyle", "fiveoldstyle",
+        "sixoldstyle", "sevenoldstyle", "eightoldstyle", "nineoldstyle",
+        "commasuperior", "threequartersemdash", "periodsuperior", "questionsmall",
+        "asuperior", "bsuperior", "centsuperior", "dsuperior", "esuperior",
+        "isuperior", "lsuperior", "msuperior", "nsuperior", "osuperior", "rsuperior",
+        "ssuperior", "tsuperior", "ff", "ffi", "ffl", "parenleftinferior",
+        "parenrightinferior", "Circumflexsmall", "hyphensuperior", "Gravesmall",
+        "Asmall", "Bsmall", "Csmall", "Dsmall", "Esmall", "Fsmall", "Gsmall",
+        "Hsmall", "Ismall", "Jsmall", "Ksmall", "Lsmall", "Msmall", "Nsmall",
+        "Osmall", "Psmall", "Qsmall", "Rsmall", "Ssmall", "Tsmall", "Usmall",
+        "Vsmall", "Wsmall", "Xsmall", "Ysmall", "Zsmall", "colonmonetary",
+        "onefitted", "rupiah", "Tildesmall", "exclamdownsmall", "centoldstyle",
+        "Lslashsmall", "Scaronsmall", "Zcaronsmall", "Dieresissmall", "Brevesmall",
+        "Caronsmall", "Dotaccentsmall", "Macronsmall", "figuredash", "hypheninferior",
+        "Ogoneksmall", "Ringsmall", "Cedillasmall", "questiondownsmall", "oneeighth",
+        "threeeighths", "fiveeighths", "seveneighths", "onethird", "twothirds",
+        "zerosuperior", "foursuperior", "fivesuperior", "sixsuperior", "sevensuperior",
+        "eightsuperior", "ninesuperior", "zeroinferior", "oneinferior", "twoinferior",
+        "threeinferior", "fourinferior", "fiveinferior", "sixinferior", "seveninferior",
+        "eightinferior", "nineinferior", "centinferior", "dollarinferior",
+        "periodinferior", "commainferior", "Agravesmall", "Aacutesmall",
+        "Acircumflexsmall", "Atildesmall", "Adieresissmall", "Aringsmall", "AEsmall",
+        "Ccedillasmall", "Egravesmall", "Eacutesmall", "Ecircumflexsmall",
+        "Edieresissmall", "Igravesmall", "Iacutesmall", "Icircumflexsmall",
+        "Idieresissmall", "Ethsmall", "Ntildesmall", "Ogravesmall", "Oacutesmall",
+        "Ocircumflexsmall", "Otildesmall", "Odieresissmall", "OEsmall", "Oslashsmall",
+        "Ugravesmall", "Uacutesmall", "Ucircumflexsmall", "Udieresissmall",
+        "Yacutesmall", "Thornsmall", "Ydieresissmall", "001.000", "001.001",
+        "001.002", "001.003", "Black", "Bold", "Book", "Light", "Medium", "Regular",
+        "Roman", "Semibold"
+    ];
+
+    private static string CffSidToString(int sid, List<CffIndexEntry> stringIndex, byte[] data)
+    {
+        if (sid < CffStandardStrings.Length)
+            return CffStandardStrings[sid];
+        var idx = sid - CffStandardStrings.Length;
+        if (idx < stringIndex.Count)
+        {
+            var entry = stringIndex[idx];
+            if (entry.offset + entry.length <= data.Length)
+                return System.Text.Encoding.ASCII.GetString(data, entry.offset, entry.length);
+        }
+        return $"SID{sid}";
+    }
+
+    private readonly record struct CffCharsetEntry(int sid, string? name);
+
+    private static List<CffCharsetEntry> CffParseCharSet(byte[] data, int offset, int nGlyphs, bool isCid, List<CffIndexEntry> stringIndex)
+    {
+        var entries = new List<CffCharsetEntry>();
+        var remaining = nGlyphs - 1; // GID 0 is .notdef, not in charset data
+
+        if (offset == 0)
+        {
+            // ISOAdobe predefined charset
+            for (var i = 1; i <= remaining && i < CffStandardStrings.Length; i++)
+                entries.Add(new CffCharsetEntry(i, CffStandardStrings[i]));
+            return entries;
+        }
+
+        if (offset >= data.Length) return entries;
+
+        var format = data[offset];
+        var pos = offset + 1;
+
+        if (format == 0)
+        {
+            for (var i = 0; i < remaining && pos + 1 < data.Length; i++)
+            {
+                var sid = (data[pos] << 8) | data[pos + 1];
+                pos += 2;
+                entries.Add(new CffCharsetEntry(sid, isCid ? null : CffSidToString(sid, stringIndex, data)));
+            }
+        }
+        else if (format == 1)
+        {
+            while (entries.Count < remaining && pos + 2 < data.Length)
+            {
+                var first = (data[pos] << 8) | data[pos + 1];
+                pos += 2;
+                var nLeft = data[pos++];
+                for (var i = 0; i <= nLeft && entries.Count < remaining; i++)
+                {
+                    var sid = first + i;
+                    entries.Add(new CffCharsetEntry(sid, isCid ? null : CffSidToString(sid, stringIndex, data)));
+                }
+            }
+        }
+        else if (format == 2)
+        {
+            while (entries.Count < remaining && pos + 3 < data.Length)
+            {
+                var first = (data[pos] << 8) | data[pos + 1];
+                pos += 2;
+                var nLeft = (data[pos] << 8) | data[pos + 1];
+                pos += 2;
+                for (var i = 0; i <= nLeft && entries.Count < remaining; i++)
+                {
+                    var sid = first + i;
+                    entries.Add(new CffCharsetEntry(sid, isCid ? null : CffSidToString(sid, stringIndex, data)));
+                }
+            }
+        }
+
+        return entries;
+    }
+
+    private static int[] CffParseFdSelect(byte[] data, int offset, int nGlyphs)
+    {
+        var result = new int[nGlyphs];
+        if (offset >= data.Length) return result;
+
+        var format = data[offset];
+        var pos = offset + 1;
+
+        if (format == 0)
+        {
+            for (var i = 0; i < nGlyphs && pos < data.Length; i++)
+                result[i] = data[pos++];
+        }
+        else if (format == 3)
+        {
+            if (pos + 1 >= data.Length) return result;
+            var nRanges = (data[pos] << 8) | data[pos + 1];
+            pos += 2;
+            for (var i = 0; i < nRanges && pos + 2 < data.Length; i++)
+            {
+                var first = (data[pos] << 8) | data[pos + 1];
+                pos += 2;
+                var fd = data[pos++];
+                var next = pos + 1 < data.Length ? ((data[pos] << 8) | data[pos + 1]) : nGlyphs;
+                for (var gid = first; gid < next && gid < nGlyphs; gid++)
+                    result[gid] = fd;
+            }
+        }
+
+        return result;
+    }
+
+    private static double CffExtractCharstringWidth(byte[] data, int offset, int length, double defaultWidth, double nominalWidth)
+    {
+        var stack = new List<double>();
+        var pos = offset;
+        var end = offset + length;
+        var hintCount = 0;
+        var widthFound = false;
+        var width = defaultWidth;
+
+        while (pos < end && pos < data.Length)
+        {
+            int b = data[pos];
+
+            if (b >= 32)
+            {
+                // Operand
+                stack.Add(CffParseCharstringOperand(data, ref pos));
+                continue;
+            }
+
+            // Operator
+            pos++;
+            int op = b;
+            if (b == 12 && pos < end)
+            {
+                op = (12 << 8) | data[pos++];
+                // Two-byte operators are not stack-clearing for width purposes
+                stack.Clear();
+                continue;
+            }
+
+            switch (op)
+            {
+                case 1:  // hstem
+                case 3:  // vstem
+                case 18: // hstemhm
+                case 23: // vstemhm
+                    if (!widthFound)
+                    {
+                        if (stack.Count % 2 != 0 && stack.Count > 0)
+                        {
+                            width = nominalWidth + stack[0];
+                            widthFound = true;
+                        }
+                        else
+                        {
+                            widthFound = true;
+                        }
+                    }
+                    hintCount += stack.Count / 2;
+                    if (!widthFound) widthFound = true;
+                    stack.Clear();
+                    continue;
+                case 19: // hintmask
+                case 20: // cntrmask
+                    if (!widthFound)
+                    {
+                        hintCount += stack.Count / 2;
+                        if (stack.Count % 2 != 0 && stack.Count > 0)
+                        {
+                            width = nominalWidth + stack[0];
+                        }
+                        widthFound = true;
+                    }
+                    else
+                    {
+                        hintCount += stack.Count / 2;
+                    }
+                    stack.Clear();
+                    // Skip hint mask bytes
+                    var maskBytes = (hintCount + 7) / 8;
+                    pos += maskBytes;
+                    continue;
+                case 4:  // vmoveto
+                    if (!widthFound)
+                    {
+                        if (stack.Count >= 2)
+                            width = nominalWidth + stack[0];
+                        widthFound = true;
+                    }
+                    stack.Clear();
+                    return width;
+                case 21: // rmoveto
+                    if (!widthFound)
+                    {
+                        if (stack.Count >= 3)
+                            width = nominalWidth + stack[0];
+                        widthFound = true;
+                    }
+                    stack.Clear();
+                    return width;
+                case 22: // hmoveto
+                    if (!widthFound)
+                    {
+                        if (stack.Count >= 2)
+                            width = nominalWidth + stack[0];
+                        widthFound = true;
+                    }
+                    stack.Clear();
+                    return width;
+                case 14: // endchar
+                    if (!widthFound)
+                    {
+                        if (stack.Count >= 1)
+                            width = nominalWidth + stack[0];
+                        widthFound = true;
+                    }
+                    return width;
+                default:
+                    stack.Clear();
+                    continue;
+            }
+        }
+
+        return width;
+    }
+
+    private static double CffParseCharstringOperand(byte[] data, ref int pos)
+    {
+        int b = data[pos++];
+        if (b == 255 && pos + 3 < data.Length)
+        {
+            // Fixed-point 16.16
+            var intPart = (short)((data[pos] << 8) | data[pos + 1]);
+            var fracPart = (data[pos + 2] << 8) | data[pos + 3];
+            pos += 4;
+            return intPart + fracPart / 65536.0;
+        }
+        if (b == 28 && pos + 1 < data.Length)
+        {
+            var v = (short)((data[pos] << 8) | data[pos + 1]);
+            pos += 2;
+            return v;
+        }
+        if (b >= 32 && b <= 246)
+            return b - 139;
+        if (b >= 247 && b <= 250 && pos < data.Length)
+            return (b - 247) * 256 + data[pos++] + 108;
+        if (b >= 251 && b <= 254 && pos < data.Length)
+            return -((b - 251) * 256) - data[pos++] - 108;
+        return 0;
+    }
+
+    // ── Type3 CharProc width extraction ──────────────────────────────
+
+    private Dictionary<string, double>? GetType3CharProcWidths(PdfDictionary font)
+    {
+        if (_type3WidthCache.TryGetValue(font, out var cached))
+            return cached;
+
+        try
+        {
+            var charProcs = font.GetOptionalValue<PdfDictionary>(new PdfName("CharProcs"));
+            if (charProcs is null)
+            {
+                _type3WidthCache[font] = null;
+                return null;
+            }
+
+            var widths = new Dictionary<string, double>(StringComparer.Ordinal);
+            foreach (var key in charProcs.Keys)
+            {
+                var stream = charProcs.Get(key)?.Resolve() as PdfStream;
+                if (stream is null) continue;
+
+                try
+                {
+                    var streamData = stream.Contents.GetDecodedData();
+                    var w = ExtractType3Width(streamData);
+                    if (w.HasValue)
+                    {
+                        widths[key.Value] = w.Value;
+                    }
+                }
+                catch
+                {
+                    // Skip individual CharProc failures
+                }
+            }
+
+            _type3WidthCache[font] = widths;
+            return widths;
+        }
+        catch
+        {
+            _type3WidthCache[font] = null;
+            return null;
+        }
+    }
+
+    private static double? ExtractType3Width(byte[] data)
+    {
+        // Parse content stream looking for d0 or d1 operator
+        // d0: wx wy d0
+        // d1: wx wy llx lly urx ury d1
+        var text = System.Text.Encoding.ASCII.GetString(data);
+        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if ((tokens[i] == "d0" && i >= 2) || (tokens[i] == "d1" && i >= 6))
+            {
+                // The first number before d0/d1 sequence is wx
+                var wxIndex = tokens[i] == "d0" ? i - 2 : i - 6;
+                if (double.TryParse(tokens[wxIndex], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var wx))
+                {
+                    return wx;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private static bool IsSymbolicFont(PdfDictionary font)
     {
         var descriptor = font.GetOptionalValue<PdfDictionary>(PdfName.FontDescriptor);
@@ -3471,6 +4424,89 @@ internal sealed partial class PdfModelBuilder
         return program is not null && glyph.Undefined ? false : null;
     }
 
+    private double? GetWidthFromDictionary(PdfDictionary? font, Glyph glyph)
+    {
+        if (font is null || !glyph.CodePoint.HasValue)
+            return null;
+
+        var validationFont = GetValidationFontDictionary(font);
+        var subtype = ConvertPdfObjectToString(validationFont.Get(PdfName.Subtype));
+
+        // For CID fonts, read from /W array (or /DW default)
+        if (string.Equals(subtype, "CIDFontType0", StringComparison.Ordinal) ||
+            string.Equals(subtype, "CIDFontType2", StringComparison.Ordinal))
+        {
+            return GetCidFontWidth(validationFont, glyph.CID ?? glyph.CodePoint.Value);
+        }
+
+        // For simple fonts, read raw value from /Widths array
+        var widths = validationFont.GetOptionalValue<PdfArray>(PdfName.Widths);
+        if (widths is null) return null;
+
+        var firstChar = validationFont.GetOptionalValue<PdfNumber>(PdfName.FirstChar);
+        if (firstChar is null) return null;
+
+        var index = (int)glyph.CodePoint.Value - (int)(double)firstChar;
+        if (index < 0 || index >= widths.Count) return null;
+
+        var widthObj = widths.Get(index)?.Resolve();
+        if (widthObj is PdfNumber num)
+            return (double)num;
+
+        return null;
+    }
+
+    private static double? GetCidFontWidth(PdfDictionary cidFont, uint cid)
+    {
+        // Try /W array first
+        var wArray = cidFont.GetOptionalValue<PdfArray>(new PdfName("W"));
+        if (wArray is not null)
+        {
+            for (var i = 0; i < wArray.Count; )
+            {
+                var startObj = wArray.Get(i)?.Resolve() as PdfNumber;
+                if (startObj is null) break;
+                var startCid = (int)(double)startObj;
+                i++;
+                if (i >= wArray.Count) break;
+
+                var next = wArray.Get(i)?.Resolve();
+                if (next is PdfArray widthList)
+                {
+                    // Format: c [w1 w2 w3 ...]
+                    i++;
+                    var idx = (int)cid - startCid;
+                    if (idx >= 0 && idx < widthList.Count)
+                    {
+                        if (widthList.Get(idx)?.Resolve() is PdfNumber w)
+                            return (double)w;
+                    }
+                }
+                else if (next is PdfNumber endNum)
+                {
+                    // Format: c_first c_last w
+                    var endCid = (int)(double)endNum;
+                    i++;
+                    if (i >= wArray.Count) break;
+                    if (wArray.Get(i)?.Resolve() is PdfNumber w)
+                    {
+                        i++;
+                        if (cid >= startCid && cid <= endCid)
+                            return (double)w;
+                    }
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        // Fall back to /DW (default width)
+        var dw = cidFont.GetOptionalValue<PdfNumber>(new PdfName("DW"));
+        return dw is not null ? (double)dw : 1000d; // PDF spec default is 1000
+    }
+
     private double? GetWidthFromFontProgram(PdfDictionary? font, Glyph glyph)
     {
         if (font is null || !glyph.CodePoint.HasValue)
@@ -3479,10 +4515,43 @@ internal sealed partial class PdfModelBuilder
         }
 
         var validationFont = GetValidationFontDictionary(font);
+
+        // Try TrueType first (FontFile2)
         var program = GetTrueTypeFontProgramInfo(validationFont);
-        return program is not null && program.WidthByCharCode.TryGetValue(glyph.CodePoint.Value, out var width)
-            ? width
-            : null;
+        if (program is not null && program.WidthByCharCode.TryGetValue(glyph.CodePoint.Value, out var width))
+        {
+            return width;
+        }
+
+        // Try CFF (FontFile3 with Subtype Type1C or CIDFontType0C)
+        var cffInfo = GetCffWidthInfo(validationFont);
+        if (cffInfo is not null)
+        {
+            // For CID fonts, lookup by CID
+            if (glyph.CID.HasValue && cffInfo.WidthByCid.TryGetValue(glyph.CID.Value, out var cidWidth))
+            {
+                return cidWidth;
+            }
+
+            // For simple CFF fonts, lookup by glyph name
+            if (glyph.Name is not null && cffInfo.WidthByName.TryGetValue(glyph.Name, out var nameWidth))
+            {
+                return nameWidth;
+            }
+        }
+
+        // Try Type3 (CharProcs d0/d1 widths)
+        var subtype = ConvertPdfObjectToString(validationFont.Get(PdfName.Subtype));
+        if (string.Equals(subtype, "Type3", StringComparison.Ordinal))
+        {
+            var type3Widths = GetType3CharProcWidths(validationFont);
+            if (type3Widths is not null && glyph.Name is not null && type3Widths.TryGetValue(glyph.Name, out var t3Width))
+            {
+                return t3Width;
+            }
+        }
+
+        return null;
     }
 
     private static PdfDictionary GetValidationFontDictionary(PdfDictionary font) =>
@@ -3634,6 +4703,21 @@ internal sealed partial class PdfModelBuilder
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Returns the CIDToGIDMap value. Only "Identity" (name) and streams are valid;
+    /// any other value (including other names) is treated as null (missing/invalid).
+    /// </summary>
+    private static string? GetCIDToGIDMapValue(IPdfObject? obj)
+    {
+        if (obj is null) return null;
+        var resolved = obj.Resolve();
+        if (resolved is PdfName name && string.Equals(name.Value, "Identity", StringComparison.Ordinal))
+            return "Identity";
+        if (resolved is PdfStream)
+            return "stream";
+        return null;
     }
 
     private static string? GetCMapName(PdfDictionary font)
@@ -4356,7 +5440,9 @@ internal sealed partial class PdfModelBuilder
 
                             if (patCSName is not null)
                             {
-                                // Check for Default* overrides in the pattern's own resources
+                                // Check for Default* overrides in the pattern's own resources only.
+                                // Tiling patterns have their own Resources dictionary and do NOT
+                                // inherit Default* colour spaces from the enclosing page.
                                 var patResources = patStream.Dictionary.GetOptionalValue<PdfDictionary>(PdfName.Resources);
                                 var patCSDict = patResources?.GetOptionalValue<PdfDictionary>(new PdfName("ColorSpace"));
                                 string? defaultKey = patCSName switch
@@ -4369,15 +5455,78 @@ internal sealed partial class PdfModelBuilder
                                 if (defaultKey is not null && patCSDict is not null && patCSDict.ContainsKey(new PdfName(defaultKey)))
                                     continue;
 
-                                // Also check parent resources for Default* overrides
-                                if (defaultKey is not null && colorSpaceDict is not null && colorSpaceDict.ContainsKey(new PdfName(defaultKey)))
-                                    continue;
-
                                 CreateDeviceColorSpaceObject(patCSName, result, documentOutputCS, pageOutputCS, transparencyCS);
                             }
                         }
                     }
                     catch { }
+                }
+            }
+        }
+
+        // Scan Type3 font CharProcs glyph streams for device colour space usage.
+        // Type3 fonts have their own content streams (one per glyph) that may use
+        // device CS operators. They have their own Resources dictionary.
+        var fontResDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("Font"));
+        if (fontResDict is not null)
+        {
+            foreach (var (_, fontVal) in fontResDict)
+            {
+                if (fontVal.Resolve() is PdfDictionary fontDict
+                    && ConvertPdfObjectToString(fontDict.Get(PdfName.Subtype)) == "Type3")
+                {
+                    var charProcs = fontDict.GetOptionalValue<PdfDictionary>(new PdfName("CharProcs"));
+                    if (charProcs is null) continue;
+                    var fontOwnResources = fontDict.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+                    var fontCSDict = fontOwnResources?.GetOptionalValue<PdfDictionary>(new PdfName("ColorSpace"));
+                    foreach (var (_, glyphVal) in charProcs)
+                    {
+                        if (glyphVal.Resolve() is PdfStream glyphStream)
+                        {
+                            try
+                            {
+                                var glyphData = glyphStream.Contents.GetDecodedData();
+                                var glyphScanner = new ContentStreamScanner(ParsingContext.Current, glyphData);
+                                while (glyphScanner.Advance())
+                                {
+                                    string? glyphCSName = glyphScanner.CurrentOperator switch
+                                    {
+                                        PdfOperatorType.rg or PdfOperatorType.RG => "DeviceRGB",
+                                        PdfOperatorType.g or PdfOperatorType.G => "DeviceGray",
+                                        PdfOperatorType.k or PdfOperatorType.K => "DeviceCMYK",
+                                        _ => null
+                                    };
+                                    if (glyphCSName is null && glyphScanner.CurrentOperator is PdfOperatorType.cs or PdfOperatorType.CS)
+                                    {
+                                        if (glyphScanner.TryGetCurrentOperation<double>(out var csOp))
+                                        {
+                                            PdfName? csOpName = csOp switch
+                                            {
+                                                cs_Op<double> csTyped => csTyped.name,
+                                                CS_Op<double> csTyped => csTyped.name,
+                                                _ => null
+                                            };
+                                            if (csOpName is not null && csOpName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                                                glyphCSName = csOpName.Value;
+                                        }
+                                    }
+                                    if (glyphCSName is null) continue;
+                                    // Check Default* overrides in the Type3 font's own resources only
+                                    string? defaultKey = glyphCSName switch
+                                    {
+                                        "DeviceRGB" => "DefaultRGB",
+                                        "DeviceCMYK" => "DefaultCMYK",
+                                        "DeviceGray" => "DefaultGray",
+                                        _ => null
+                                    };
+                                    if (defaultKey is not null && fontCSDict is not null && fontCSDict.ContainsKey(new PdfName(defaultKey)))
+                                        continue;
+                                    CreateDeviceColorSpaceObject(glyphCSName, result, documentOutputCS, pageOutputCS, transparencyCS);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
                 }
             }
         }
