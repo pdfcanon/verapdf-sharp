@@ -5,6 +5,198 @@ using VeraPdfSharp.Core;
 using VeraPdfSharp.Model;
 using VeraPdfSharp.Validation;
 
+// --- Transparency diagnosis ---
+var corpusBase = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "veraPDF-corpus-staging"));
+
+var diagFiles = new[] {
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-f.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-g.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t03-fail-g.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t06-fail-f.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t07-fail-f.pdf", PDFAFlavour.PDFA4),
+    // Also check a passing file for comparison
+    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-a.pdf", PDFAFlavour.PDFA4),
+};
+
+foreach (var (relPath, flavour) in diagFiles)
+{
+    var path = Path.Combine(corpusBase, relPath);
+    Console.WriteLine($"\n=== {Path.GetFileName(path)} ({flavour}) ===");
+
+    // Raw PDF structure inspection
+    using var doc = PdfDocument.Open(File.ReadAllBytes(path));
+    foreach (var (page, pi) in doc.Pages.Select((p, i) => (p, i)))
+    {
+        Console.WriteLine($"  Page {pi}:");
+        var pg = page.NativeObject;
+        
+        // Check Group
+        var group = pg.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+        if (group is not null)
+        {
+            var s = (group.Get(new PdfName("S"))?.Resolve() as PdfName)?.Value
+                 ?? (group.Get(new PdfName("Subtype"))?.Resolve() as PdfName)?.Value;
+            var cs = group.Get(new PdfName("CS"))?.Resolve();
+            Console.WriteLine($"    Group: S={s}, CS={DescribeObj(cs)}");
+        }
+        else Console.WriteLine("    Group: null");
+        
+        // Check ExtGState resources
+        var res = pg.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+        var gsDict = res?.GetOptionalValue<PdfDictionary>(new PdfName("ExtGState"));
+        if (gsDict is not null)
+        {
+            foreach (var key in gsDict.Keys)
+            {
+                var gs = gsDict.Get(key)?.Resolve() as PdfDictionary;
+                if (gs is null) continue;
+                var bm = gs.Get(new PdfName("BM"))?.Resolve();
+                var smask = gs.Get(new PdfName("SMask"))?.Resolve();
+                var ca = gs.Get(new PdfName("ca"))?.Resolve();
+                var CA = gs.Get(new PdfName("CA"))?.Resolve();
+                Console.WriteLine($"    GS {key.Value}: BM={DescribeObj(bm)}, SMask={DescribeObj(smask)}, ca={DescribeObj(ca)}, CA={DescribeObj(CA)}");
+            }
+        }
+        
+        // Check XObject resources for form XObjects with Group
+        var xoDict = res?.GetOptionalValue<PdfDictionary>(new PdfName("XObject"));
+        if (xoDict is not null)
+        {
+            foreach (var key in xoDict.Keys)
+            {
+                var xo = xoDict.Get(key)?.Resolve();
+                if (xo is PdfStream xoStream)
+                {
+                    var subtype = (xoStream.Dictionary.Get(new PdfName("Subtype"))?.Resolve() as PdfName)?.Value;
+                    var xoGroup = xoStream.Dictionary.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+                    if (xoGroup is not null || subtype == "Form")
+                    {
+                        var gS = xoGroup is null ? "null" : ((xoGroup.Get(new PdfName("S"))?.Resolve() as PdfName)?.Value ?? "?");
+                        var gCS = xoGroup?.Get(new PdfName("CS"))?.Resolve();
+                        Console.WriteLine($"    XObject {key.Value}: Subtype={subtype}, Group.S={gS}, Group.CS={DescribeObj(gCS)}");
+                        
+                        // Check XObject's own ExtGState
+                        var xoRes = xoStream.Dictionary.GetOptionalValue<PdfDictionary>(new PdfName("Resources"));
+                        var xoGsDict = xoRes?.GetOptionalValue<PdfDictionary>(new PdfName("ExtGState"));
+                        if (xoGsDict is not null)
+                        {
+                            foreach (var gsKey in xoGsDict.Keys)
+                            {
+                                var gs = xoGsDict.Get(gsKey)?.Resolve() as PdfDictionary;
+                                if (gs is null) continue;
+                                var bmX = gs.Get(new PdfName("BM"))?.Resolve();
+                                var smaskX = gs.Get(new PdfName("SMask"))?.Resolve();
+                                Console.WriteLine($"      GS {gsKey.Value}: BM={DescribeObj(bmX)}, SMask={DescribeObj(smaskX)}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check Annotations
+        if (pg.TryGetValue<PdfArray>(new PdfName("Annots"), out var annots, false))
+        {
+            foreach (var annotObj in annots)
+            {
+                var annot = annotObj.Resolve() as PdfDictionary;
+                if (annot is null) continue;
+                var annotBM = annot.Get(new PdfName("BM"))?.Resolve();
+                Console.WriteLine($"    Annot: BM={DescribeObj(annotBM)}");
+            }
+        }
+        
+        // Check OutputIntents on catalog
+        var catalog = doc.Catalog;
+        if (catalog.TryGetValue<PdfArray>(new PdfName("OutputIntents"), out var ois, false))
+        {
+            foreach (var oiObj in ois)
+            {
+                var oi = oiObj.Resolve() as PdfDictionary;
+                if (oi is null) continue;
+                var s = (oi.Get(new PdfName("S"))?.Resolve() as PdfName)?.Value;
+                var hasProfile = oi.ContainsKey(new PdfName("DestOutputProfile"));
+                Console.WriteLine($"    OutputIntent: S={s}, hasProfile={hasProfile}");
+            }
+        }
+    }
+
+    // Now run validator and check model objects
+    using var parser = PdfLexerValidationParser.FromFile(path, flavour);
+    var validator = ValidatorFactory.CreateValidator(new[] { flavour }, new ValidatorOptions(ShowErrorMessages: true));
+    var result = validator.Validate(parser);
+    Console.WriteLine($"  Compliant: {result.IsCompliant}, FailedRules: {result.FailedChecks.Count}");
+    foreach (var a in result.TestAssertions.Where(x => x.Status == TestAssertionStatus.Failed).Take(10))
+        Console.WriteLine($"  FAIL: {a.RuleId} - {a.Description?.Substring(0, Math.Min(120, a.Description?.Length ?? 0))}");
+
+    // Dump PDPage objects with transparency properties
+    var visited = new HashSet<IModelObject>(ReferenceEqualityComparer.Instance);
+    void DumpObjects(IModelObject obj, int depth = 0)
+    {
+        if (!visited.Add(obj) || depth > 10) return;
+        if (obj.ObjectType == "PDPage")
+        {
+            var props = new[] { "containsGroupCS", "containsTransparency", "gOutputCS", "gDocumentOutputCS", "gPageOutputCS", "outputColorSpace", "gTransparencyCS" };
+            var vals = string.Join(", ", props.Select(p => $"{p}={obj.GetPropertyValue(p) ?? "null"}"));
+            Console.WriteLine($"  PDPage: [{vals}]");
+        }
+        foreach (var ln in obj.Links) foreach (var lo in obj.GetLinkedObjects(ln)) DumpObjects(lo, depth + 1);
+    }
+    DumpObjects(parser.GetRoot());
+}
+return;
+
+static string DescribeObj(IPdfObject? obj) => obj switch
+{
+    PdfName n => $"/{n.Value}",
+    PdfArray a => $"[{string.Join(", ", a.Select(e => DescribeObj(e.Resolve())))}]",
+    PdfDictionary d => $"<< keys={string.Join(",", d.Keys.Select(k => k.Value))} >>",
+    PdfStream s => $"stream(keys={string.Join(",", s.Dictionary.Keys.Select(k => k.Value))})",
+    PdfNumber num => num.ToString() ?? "",
+    _ => obj?.ToString() ?? "null"
+};
+
+// Old diagnostic code below — unreachable
+#if false
+{
+    var path = Path.Combine(corpusBase, relPath);
+    Console.WriteLine($"\n=== {Path.GetFileName(path)} ===");
+    try
+    {
+        using var parser = PdfLexerValidationParser.FromFile(path, flavour);
+        var validator = ValidatorFactory.CreateValidator(new[] { flavour }, new ValidatorOptions(ShowErrorMessages: true));
+        var result = validator.Validate(parser);
+        Console.WriteLine($"  Compliant: {result.IsCompliant}, Assertions: {result.TotalAssertions}, FailedRules: {result.FailedChecks.Count}");
+        foreach (var a in result.TestAssertions.Where(x => x.Status == TestAssertionStatus.Failed).Take(5))
+            Console.WriteLine($"  FAIL: {a.RuleId} {a.Location.Path} - {a.Description?.Substring(0, Math.Min(120, a.Description?.Length ?? 0))}");
+
+        // Dump PDDevice and ICCInputProfile objects with properties
+        var visited = new HashSet<IModelObject>(ReferenceEqualityComparer.Instance);
+        void DumpCSObjects(IModelObject obj, int depth = 0)
+        {
+            if (!visited.Add(obj) || depth > 10) return;
+            var t = obj.ObjectType;
+            if (t.StartsWith("PDDevice") || t == "ICCInputProfile" || t.StartsWith("PDSeparation") || t.StartsWith("PDDeviceN") || t == "PDIndexed" || t == "PDPattern" || t == "CosIIFilter")
+            {
+                var props = string.Join(", ", obj.Properties.Select(pn => $"{pn}={obj.GetPropertyValue(pn)}"));
+                Console.WriteLine($"  {"".PadLeft(depth*2)}OBJ: {t} [{props}]");
+            }
+            foreach (var linkName in obj.Links)
+            {
+                foreach (var linked in obj.GetLinkedObjects(linkName))
+                    DumpCSObjects(linked, depth + 1);
+            }
+        }
+        DumpCSObjects(parser.GetRoot());
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"  ERROR: {ex.Message}");
+    }
+}
+return;
+// --- END TEMPORARY ---
+
 // Dump struct tree and role map for media clip files failing 7.1/5
 foreach (var mediaFile in new[] { "7.18 Annotations/7.18.6 Media/7.18.6.2 Media clip data/7.18.6.2-t01-pass-a.pdf", "7.18 Annotations/7.18.6 Media/7.18.6.2 Media clip data/7.18.6.2-t02-pass-a.pdf" })
 {
@@ -649,3 +841,5 @@ static void PrintLBodyParent(IModelObject obj, HashSet<IModelObject> seen, strin
         }
     }
 }
+
+#endif

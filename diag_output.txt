@@ -1,0 +1,153 @@
+=== STRUCT TREE + ROLEMAP: 7.18.6.2-t01-pass-a.pdf ===
+  RoleMap:
+  Namespaces: (none)
+  S=Document keys=[K,P,Pg,S,Type]
+    S=H1 keys=[A,K,P,Pg,S,Type]
+    S=Figure keys=[A,Alt,K,P,Pg,S,T]
+      S=Annot keys=[K,P,S,T]
+        S=(none) keys=[Obj,Pg,Type]
+=== STRUCT TREE + ROLEMAP: 7.18.6.2-t02-pass-a.pdf ===
+  RoleMap:
+  Namespaces: (none)
+  S=Document keys=[K,P,Pg,S,Type]
+    S=H1 keys=[A,K,P,Pg,S,Type]
+    S=Figure keys=[A,Alt,K,P,Pg,S,T]
+      S=Annot keys=[K,P,S,T]
+        S=(none) keys=[Obj,Pg,Type]
+=== RAW STRUCT TREE: 7.2-t17-pass-b.pdf ===
+  StructTreeRoot keys: K, ParentTree, Type
+  Dict: Type=StructElem S=Document /P=True keys=[K,P,Pg,S,Type]
+    Dict: Type=StructElem S=L /P=True keys=[A,K,P,Pg,S,Type]
+      Dict: Type=StructElem S=Caption /P=True keys=[A,K,P,Pg,S,Type]
+        [PdfIntNumber: 0]
+      Dict: Type=StructElem S=LI /P=True keys=[K,P,Pg,S,Type]
+        [PdfIntNumber: 40]
+        [PdfIntNumber: 39]
+      Dict: Type=StructElem S=LI /P=True keys=[K,P,Pg,S,Type]
+        [PdfIntNumber: 41]
+        [PdfIntNumber: 42]
+      Dict: Type=StructElem S=LI /P=True keys=[K,P,Pg,S,Type]
+        [PdfIntNumber: 43]
+        [PdfIntNumber: 44]
+      Dict: Type=StructElem S=LI /P=True keys=[K,P,Pg,S,Type]
+        [PdfIntNumber: 45]
+        [PdfIntNumber: 46]
+=== RAW CONTENT MODEL: 7.1-t01-pass-b.pdf ===
+  Page keys: Contents, Group, MediaBox, Parent, Resources, StructParents, Tabs, Type
+  StructParents: 0
+  Content items: 1
+    MarkedContentGroup tag=P mcid=none children=1
+      MarkedContentGroup tag=Artifact mcid=none children=1
+        Text
+=== TABLE TRACE: 7.2-t15-pass-a.pdf ===
+  S=Document
+    S=Table
+      S=TR
+        S=TD
+        S=TH Scope=Column
+          MCID=15
+      S=TR
+        S=TH Scope=Column
+          MCID=16
+        S=TH Scope=Column
+          MCID=17
+        S=TH Scope=Column
+          MCID=18
+      S=TR
+        S=TH Scope=Row
+          MCID=19
+        S=TD
+          MCID=20
+        S=TD
+          MCID=21
+        S=TD
+          MCID=22
+      S=TR
+        S=TD
+          MCID=23
+        S=TD
+          MCID=24
+        S=TD
+          MCID=25
+      S=TR
+        S=TH Scope=Row
+          MCID=26
+        S=TD
+          MCID=27
+        S=TD
+          MCID=28
+        S=TD
+          MCID=29
+=== CONTENT MODEL: 7.2-t30-pass-a.pdf ===
+  MCG tag=P mcid=0 lang=none keys=[MCID] children=1
+    MCG tag=Span mcid=none lang=(EN-US) keys=[ActualText,Lang] children=1
+      Text
+  MCG tag=Caption mcid=1 lang=none keys=[MCID] children=1
+    Text
+  MCG tag=LI mcid=2 lang=none keys=[MCID] children=1
+    Text
+  MCG tag=LI mcid=3 lang=none keys=[MCID] children=4
+    Text
+    Text
+    Text
+    Text
+  MCG tag=LI mcid=4 lang=none keys=[MCID] children=1
+    Text
+=== TRACE: 7.2-t30-pass-a.pdf ===
+  Catalog.Lang= hasKey=False
+  S=Document Lang= K=Array[2] keys=[K,P,Pg,S,Type]
+    S=P Lang= K=Array[1] keys=[A,K,P,Pg,S,Type]
+      MCID=0
+    S=L Lang=(en-US) K=Array[4] keys=[K,Lang,P,S,T]
+      S=Caption Lang= K=MCID=1 keys=[K,P,Pg,S,T]
+        MCID=1
+      S=LI Lang= K=MCID=2 keys=[K,P,Pg,S,T]
+        MCID=2
+      S=LI Lang= K=MCID=3 keys=[K,P,Pg,S,T]
+        MCID=3
+      S=LI Lang= K=MCID=4 keys=[K,P,Pg,S,T]
+        MCID=4
+=== TRACE: 7.2-t30-pass-b.pdf ===
+  Catalog.Lang= hasKey=False
+  S=Document Lang= K=Array[3] keys=[K,P,Pg,S,Type]
+    S=P Lang=(en-US) K=Array[1] keys=[A,K,Lang,P,Pg,S,Type]
+      MCID=0
+    S=P Lang=(en-US) K=Array[1] keys=[A,K,Lang,P,Pg,S,Type]
+      MCID=1
+    S=L Lang=(en-US) K=Array[6] keys=[K,Lang,P,S,T]
+      S=Caption Lang= K=MCID=2 keys=[K,P,Pg,S,T]
+        MCID=2
+      S=LI Lang= K=MCID=3 keys=[K,P,Pg,S,T]
+        MCID=3
+      S=LI Lang= K=MCID=4 keys=[K,P,Pg,S,T]
+        MCID=4
+      S=LI Lang= K=MCID=5 keys=[K,P,Pg,S,T]
+        MCID=5
+      S=LI Lang= K=MCID=6 keys=[K,P,Pg,S,T]
+        MCID=6
+      S=LI Lang= K=MCID=7 keys=[K,P,Pg,S,T]
+        MCID=7
+=== TRACE: 7.2-t24-pass-b.pdf ===
+  Catalog.Lang= hasKey=False
+  S=Document Lang= K=Array[3] keys=[K,P,Pg,S,Type]
+    S=H1 Lang=(en-US) K=Array[1] keys=[A,K,Lang,P,Pg,S,Type]
+      MCID=0
+    S=Link Lang=(en-US) K=Array[2] keys=[A,K,Lang,P,Pg,S,Type]
+      S=(none) Lang= K=null keys=[Obj,Type]
+      S=Span Lang= K=MCID=2 keys=[K,P,Pg,S,T]
+        MCID=2
+    S=L Lang=(en-US) K=Array[4] keys=[K,Lang,P,S,T]
+      S=Caption Lang= K=MCID=3 keys=[K,P,Pg,S,T]
+        MCID=3
+      S=LI Lang= K=MCID=4 keys=[K,P,Pg,S,T]
+        MCID=4
+      S=LI Lang= K=MCID=5 keys=[K,P,Pg,S,T]
+        MCID=5
+      S=LI Lang= K=MCID=6 keys=[K,P,Pg,S,T]
+        MCID=6
+Found 141 pass files in E:\dev\VeraPdfSharp\veraPDF-corpus-staging\PDF_UA-1
+
+0/141 pass-files incorrectly failing (0 crashes)
+
+Rule failures ranked by frequency:
+--------------------------------------------------------------------------------

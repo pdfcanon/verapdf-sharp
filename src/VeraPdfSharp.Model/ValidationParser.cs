@@ -2,10 +2,12 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using PdfLexer;
+using PdfLexer.Content;
 using PdfLexer.Content.Model;
 using PdfLexer.DOM;
 using PdfLexer.Fonts;
 using PdfLexer.Fonts.Files;
+using PdfLexer.Operators;
 using VeraPdfSharp.Core;
 
 namespace VeraPdfSharp.Model;
@@ -366,6 +368,10 @@ internal sealed partial class PdfModelBuilder
     private readonly HashSet<PdfStream> _referencedFormXObjects = new(ReferenceEqualityComparer<PdfStream>.Instance);
     private readonly HashSet<string> _duplicateNoteIds = new(StringComparer.Ordinal);
     private HashSet<PdfDictionary>? _afReferencedFileSpecs;
+    // Track Separation colorant data for areTintAndAlternateConsistent:
+    // Maps colorant name → (alternate COS object, tintTransform COS object) from first occurrence
+    private readonly Dictionary<string, (IPdfObject alternate, IPdfObject tintTransform)> _separationsByColorant = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _inconsistentSeparations = new(StringComparer.Ordinal);
     private bool _structureInitialized;
     private PdfDictionary? _currentPageDict;
 
@@ -3224,7 +3230,7 @@ internal sealed partial class PdfModelBuilder
 
     /// <summary>
     /// Creates color space model objects (PDDeviceRGB/CMYK/Gray, ICCInputProfile, etc.)
-    /// from a page's or form XObject's resource dictionary.
+    /// from a page's or form XObject's resource dictionary and content stream operators.
     /// </summary>
     private List<IModelObject> CreateColorSpaceObjects(PdfDictionary resourceOwner, string? documentOutputCS, string? pageOutputCS, string? transparencyCS)
     {
@@ -3258,6 +3264,243 @@ internal sealed partial class PdfModelBuilder
             {
                 CreateColorSpaceObjectFromRef(value, resources, result, documentOutputCS, pageOutputCS, transparencyCS);
             }
+        }
+
+        // Scan Shading resources — each shading dictionary has its own /ColorSpace entry
+        var shadingDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("Shading"));
+        if (shadingDict is not null)
+        {
+            foreach (var (_, value) in shadingDict)
+            {
+                if (value.Resolve() is PdfDictionary shading)
+                {
+                    var csObj = shading.Get(PdfName.ColorSpace);
+                    CreateColorSpaceObjectFromRef(csObj, resources, result, documentOutputCS, pageOutputCS, transparencyCS);
+                }
+            }
+        }
+
+        // Scan tiling pattern content streams for device colour space usage.
+        // Tiling patterns (PatternType=1) have their own content streams that may use
+        // device CS operators (cs /DeviceRGB, rg, k, etc.).
+        var patternResDict = resources.GetOptionalValue<PdfDictionary>(new PdfName("Pattern"));
+        if (patternResDict is not null)
+        {
+            foreach (var (_, value) in patternResDict)
+            {
+                if (value.Resolve() is PdfStream patStream)
+                {
+                    var patType = GetNumberValue(patStream.Dictionary.Get(new PdfName("PatternType")));
+                    if (patType is null || (int)patType.Value != 1) continue;
+
+                    // Scan the tiling pattern's content stream
+                    try
+                    {
+                        var patData = patStream.Contents.GetDecodedData();
+                        var patScanner = new ContentStreamScanner(ParsingContext.Current, patData);
+                        while (patScanner.Advance())
+                        {
+                            string? patCSName = patScanner.CurrentOperator switch
+                            {
+                                PdfOperatorType.rg or PdfOperatorType.RG => "DeviceRGB",
+                                PdfOperatorType.g or PdfOperatorType.G => "DeviceGray",
+                                PdfOperatorType.k or PdfOperatorType.K => "DeviceCMYK",
+                                _ => null
+                            };
+
+                            // Also check cs/CS operators
+                            if (patCSName is null && patScanner.CurrentOperator is PdfOperatorType.cs or PdfOperatorType.CS)
+                            {
+                                if (patScanner.TryGetCurrentOperation<double>(out var csOp))
+                                {
+                                    PdfName? csOpName = csOp switch
+                                    {
+                                        cs_Op<double> csTyped => csTyped.name,
+                                        CS_Op<double> csTyped => csTyped.name,
+                                        _ => null
+                                    };
+                                    if (csOpName is not null && csOpName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                                        patCSName = csOpName.Value;
+                                }
+                            }
+
+                            if (patCSName is not null)
+                            {
+                                // Check for Default* overrides in the pattern's own resources
+                                var patResources = patStream.Dictionary.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+                                var patCSDict = patResources?.GetOptionalValue<PdfDictionary>(new PdfName("ColorSpace"));
+                                string? defaultKey = patCSName switch
+                                {
+                                    "DeviceRGB" => "DefaultRGB",
+                                    "DeviceCMYK" => "DefaultCMYK",
+                                    "DeviceGray" => "DefaultGray",
+                                    _ => null
+                                };
+                                if (defaultKey is not null && patCSDict is not null && patCSDict.ContainsKey(new PdfName(defaultKey)))
+                                    continue;
+
+                                // Also check parent resources for Default* overrides
+                                if (defaultKey is not null && colorSpaceDict is not null && colorSpaceDict.ContainsKey(new PdfName(defaultKey)))
+                                    continue;
+
+                                CreateDeviceColorSpaceObject(patCSName, result, documentOutputCS, pageOutputCS, transparencyCS);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // Scan content stream operators for implicit device colour space usage
+        // (rg/RG → DeviceRGB, g/G → DeviceGray, k/K → DeviceCMYK)
+        // We use flattenForms to scan into form XObjects, but track each device CS
+        // with the transparency context it appears in (page-level or form-level group CS).
+        try
+        {
+            // Key: device CS name → effective transparency CS (may differ from page-level when inside a form)
+            var deviceCSWithContext = new Dictionary<string, string?>(StringComparer.Ordinal);
+            bool hasMarkingOps = false; // Track whether any marking/painting operators appear
+            bool hasExplicitColor = false; // Track whether any color operator was used
+            var scanner = new PageContentScanner(ParsingContext.Current, resourceOwner, flattenForms: true);
+            while (scanner.Advance())
+            {
+                string? csName = scanner.CurrentOperator switch
+                {
+                    PdfOperatorType.rg or PdfOperatorType.RG => "DeviceRGB",
+                    PdfOperatorType.g or PdfOperatorType.G => "DeviceGray",
+                    PdfOperatorType.k or PdfOperatorType.K => "DeviceCMYK",
+                    _ => null
+                };
+
+                // Detect marking operators: text show (Tj/TJ/'/" ), path painting (S/s/f/F/f*/B/B*/b/b*)
+                if (!hasMarkingOps)
+                {
+                    hasMarkingOps = scanner.CurrentOperator is
+                        PdfOperatorType.Tj or PdfOperatorType.TJ or PdfOperatorType.singlequote or PdfOperatorType.doublequote or
+                        PdfOperatorType.S or PdfOperatorType.s or PdfOperatorType.f or PdfOperatorType.F or
+                        PdfOperatorType.f_Star or PdfOperatorType.B or PdfOperatorType.B_Star or
+                        PdfOperatorType.b or PdfOperatorType.b_Star;
+                }
+
+                // Also check inline images for device colour space usage
+                if (csName is null && scanner.CurrentOperator == PdfOperatorType.EI)
+                {
+                    if (scanner.TryGetCurrentOperation(out var op) && op is InlineImage_Op<double> inlineImg)
+                    {
+                        // Resolve with form-level resources when inside a form XObject
+                        var imgResources = resources;
+                        if (scanner.CurrentForm is { } curForm)
+                        {
+                            var formRes = curForm.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+                            if (formRes is not null) imgResources = formRes;
+                        }
+                        var imgStream = inlineImg.ConvertToStream(imgResources);
+                        var imgCS = imgStream.Dictionary.Get(PdfName.ColorSpace);
+                        if (imgCS is not null)
+                        {
+                            var resolvedCS = imgCS.Resolve();
+                            if (resolvedCS is PdfName pn && pn.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                            {
+                                csName = pn.Value;
+                            }
+                            else
+                            {
+                                // Non-device CS from inline image (Indexed, ICCBased, etc.)
+                                CreateColorSpaceObjectFromRef(imgCS, imgResources, result, documentOutputCS, pageOutputCS, transparencyCS);
+                            }
+                        }
+                    }
+                }
+
+                // Also check cs/CS operators that explicitly set a device colour space
+                if (csName is null && scanner.CurrentOperator is PdfOperatorType.cs or PdfOperatorType.CS)
+                {
+                    hasExplicitColor = true; // cs/CS always explicitly sets a color space
+                    if (scanner.TryGetCurrentOperation(out var csOp))
+                    {
+                        PdfName? csOpName = csOp switch
+                        {
+                            cs_Op<double> csTyped => csTyped.name,
+                            CS_Op<double> csTyped => csTyped.name,
+                            _ => null
+                        };
+                        if (csOpName is not null && csOpName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                            csName = csOpName.Value;
+                    }
+                }
+
+                if (csName is not null) hasExplicitColor = true;
+                if (csName is null) continue;
+
+                // Determine the effective transparency CS: if inside a form XObject,
+                // use the form's own /Group /CS as the transparency blending space,
+                // but only if the form's CS is device-independent (CalRGB, ICCBased, etc.).
+                // A device CS (DeviceRGB/CMYK/Gray) on the form group doesn't provide
+                // a calibrated blending context, so the page-level transparency CS still applies.
+                var effectiveTranspCS = transparencyCS;
+                if (scanner.CurrentForm is { } formDict)
+                {
+                    var group = formDict.GetOptionalValue<PdfDictionary>(new PdfName("Group"));
+                    if (group is not null)
+                    {
+                        var formCSObj = group.Get(new PdfName("CS"));
+                        if (formCSObj is not null)
+                        {
+                            var resolved = formCSObj.Resolve();
+                            if (resolved is PdfName csn && csn.Value is not ("DeviceRGB" or "DeviceCMYK" or "DeviceGray"))
+                                effectiveTranspCS = csn.Value;
+                            else if (resolved is PdfArray csArr && csArr.Count > 0)
+                            {
+                                var csType = ConvertPdfObjectToString(csArr[0]);
+                                if (string.Equals(csType, "ICCBased", StringComparison.Ordinal) && csArr.Count > 1 && csArr[1].Resolve() is PdfStream iccStream)
+                                    effectiveTranspCS = ReadIccColorSpace(iccStream);
+                                else if (csType is "CalRGB" or "CalGray" or "Lab")
+                                    effectiveTranspCS = csType;
+                            }
+                        }
+                    }
+                }
+
+                // Only store the first occurrence per device CS (with its context)
+                // If the same device CS appears both at page level and in a form,
+                // the page-level context is more restrictive (no form group CS to help).
+                if (!deviceCSWithContext.ContainsKey(csName))
+                    deviceCSWithContext[csName] = effectiveTranspCS;
+                else if (effectiveTranspCS is null || effectiveTranspCS != deviceCSWithContext[csName])
+                {
+                    // Multiple contexts — use the most restrictive (page-level / null)
+                    if (deviceCSWithContext[csName] is not null && effectiveTranspCS is null)
+                        deviceCSWithContext[csName] = null;
+                }
+            }
+
+            // Implicit DeviceGray: if marking/painting operators exist but no explicit
+            // color operator was used, the default graphics state uses DeviceGray.
+            if (hasMarkingOps && !hasExplicitColor && !deviceCSWithContext.ContainsKey("DeviceGray"))
+            {
+                deviceCSWithContext["DeviceGray"] = transparencyCS;
+            }
+
+            // Check for Default* overrides in resources — if present, the device CS is remapped
+            foreach (var (csName, effectiveTranspCS) in deviceCSWithContext)
+            {
+                string? defaultKey = csName switch
+                {
+                    "DeviceRGB" => "DefaultRGB",
+                    "DeviceCMYK" => "DefaultCMYK",
+                    "DeviceGray" => "DefaultGray",
+                    _ => null
+                };
+                if (defaultKey is not null && colorSpaceDict is not null && colorSpaceDict.ContainsKey(new PdfName(defaultKey)))
+                    continue; // Remapped by Default* — not a true device color space
+
+                CreateDeviceColorSpaceObject(csName, result, documentOutputCS, pageOutputCS, effectiveTranspCS);
+            }
+        }
+        catch (Exception)
+        {
+            // Content stream parsing may fail for malformed PDFs
         }
 
         return result;
@@ -3322,29 +3565,108 @@ internal sealed partial class PdfModelBuilder
                 case "Separation":
                     {
                         var sep = new GenericModelObject("PDSeparation");
-                        // Separation validation: areTintAndAlternateConsistent
-                        // For now, set to true (conservative); full validation would compare tint transform and alternate
-                        sep.Set("areTintAndAlternateConsistent", true);
-                        if (csArray.Count > 1)
+                        string? colorantName = csArray.Count > 1 ? ConvertPdfObjectToString(csArray[1]) : null;
+                        // areTintAndAlternateConsistent: true if this is the first Separation with
+                        // this colorant name, or if every other Separation with the same name has
+                        // the same alternate CS and tintTransform (compared by COS object identity)
+                        bool consistent = true;
+                        if (colorantName is not null && csArray.Count > 3)
                         {
-                            sep.Set("name", ConvertPdfObjectToString(csArray[1]));
+                            var alternate = csArray[2].Resolve();
+                            var tintTransform = csArray[3].Resolve();
+                            if (_inconsistentSeparations.Contains(colorantName))
+                            {
+                                consistent = false;
+                            }
+                            else if (_separationsByColorant.TryGetValue(colorantName, out var existing))
+                            {
+                                if (!PdfObjectStructuralComparer.AreEqual(existing.alternate, alternate) ||
+                                    !PdfObjectStructuralComparer.AreEqual(existing.tintTransform, tintTransform))
+                                {
+                                    consistent = false;
+                                    _inconsistentSeparations.Add(colorantName);
+                                }
+                            }
+                            else
+                            {
+                                _separationsByColorant[colorantName] = (alternate, tintTransform);
+                            }
+                        }
+                        sep.Set("areTintAndAlternateConsistent", consistent);
+                        if (colorantName is not null)
+                        {
+                            sep.Set("name", colorantName);
                         }
                         result.Add(sep);
+                        // Recurse into the alternate CS — it may be a device CS
+                        if (csArray.Count > 2)
+                            CreateColorSpaceObjectFromRef(csArray[2], resources, result, documentOutputCS, pageOutputCS, transparencyCS);
                     }
                     break;
                 case "DeviceN":
                     {
                         var deviceN = new GenericModelObject("PDDeviceN");
-                        if (csArray.Count > 1 && csArray[1].Resolve() is PdfArray namesArr)
+                        PdfArray? namesArr = null;
+                        if (csArray.Count > 1 && csArray[1].Resolve() is PdfArray na)
                         {
+                            namesArr = na;
                             deviceN.Set("nrComponents", namesArr.Count);
                         }
-                        // areColorantsPresent: check if /Colorants subdictionary exists in the attributes (csArray[4])
-                        var hasColorants = csArray.Count > 4 && csArray[4].Resolve() is PdfDictionary attrs
-                                           && attrs.ContainsKey(new PdfName("Colorants"));
+                        // areColorantsPresent: veraPDF semantics —
+                        // True if every colorant name in the names array is accounted for by:
+                        //   (a) standard CMYK process names (Cyan/Magenta/Yellow/Black), OR
+                        //   (b) the name "None", OR
+                        //   (c) a key in the Colorants subdictionary of attrs (csArray[4]), OR
+                        //   (d) a name in the Process/Components array of attrs
+                        bool hasColorants = true;
+                        if (namesArr is not null)
+                        {
+                            var knownNames = new HashSet<string>(StringComparer.Ordinal) { "Cyan", "Magenta", "Yellow", "Black", "None" };
+                            // Merge Colorants dict keys
+                            if (csArray.Count > 4 && csArray[4].Resolve() is PdfDictionary attrs)
+                            {
+                                if (attrs.TryGetValue<PdfDictionary>(new PdfName("Colorants"), out var colorantsDict))
+                                {
+                                    foreach (var (key, _) in colorantsDict)
+                                        knownNames.Add(key.Value!);
+                                }
+                                // Merge Process/Components array names
+                                if (attrs.TryGetValue<PdfDictionary>(new PdfName("Process"), out var processDict)
+                                    && processDict.TryGetValue<PdfArray>(new PdfName("Components"), out var componentsArr))
+                                {
+                                    foreach (var comp in componentsArr)
+                                    {
+                                        var compName = ConvertPdfObjectToString(comp);
+                                        if (compName is not null) knownNames.Add(compName);
+                                    }
+                                }
+                            }
+                            foreach (var nameObj in namesArr)
+                            {
+                                var colorantName = ConvertPdfObjectToString(nameObj);
+                                if (colorantName is not null && !knownNames.Contains(colorantName))
+                                {
+                                    hasColorants = false;
+                                    break;
+                                }
+                            }
+                        }
                         deviceN.Set("areColorantsPresent", hasColorants);
                         result.Add(deviceN);
+                        // Recurse into the alternate CS — it may be a device CS
+                        if (csArray.Count > 2)
+                            CreateColorSpaceObjectFromRef(csArray[2], resources, result, documentOutputCS, pageOutputCS, transparencyCS);
                     }
+                    break;
+                case "Indexed":
+                    // [/Indexed baseCS hival lookup] — the base CS may be a device CS
+                    if (csArray.Count > 1)
+                        CreateColorSpaceObjectFromRef(csArray[1], resources, result, documentOutputCS, pageOutputCS, transparencyCS);
+                    break;
+                case "Pattern":
+                    // [/Pattern underlyingCS] — uncoloured tiling patterns; base may be device CS
+                    if (csArray.Count > 1)
+                        CreateColorSpaceObjectFromRef(csArray[1], resources, result, documentOutputCS, pageOutputCS, transparencyCS);
                     break;
             }
         }
@@ -5415,4 +5737,70 @@ internal sealed class ReferenceEqualityComparer<T> : IEqualityComparer<T>
     public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
 
     public int GetHashCode(T obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+}
+
+/// <summary>
+/// Structural equality comparer for PDF objects. Compares resolved objects deeply.
+/// </summary>
+internal static class PdfObjectStructuralComparer
+{
+    public static bool AreEqual(IPdfObject? a, IPdfObject? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null) return false;
+
+        a = a.Resolve();
+        b = b.Resolve();
+        if (ReferenceEquals(a, b)) return true;
+
+        if (a.Type != b.Type) return false;
+
+        return (a, b) switch
+        {
+            (PdfName na, PdfName nb) => na.Equals(nb),
+            (PdfNumber na, PdfNumber nb) => na.ToString() == nb.ToString(),
+            (PdfBoolean ba, PdfBoolean bb) => ba.Value == bb.Value,
+            (PdfString sa, PdfString sb) => sa.Value == sb.Value,
+            (PdfArray aa, PdfArray ab) => AreArraysEqual(aa, ab),
+            (PdfStream sa, PdfStream sb) => AreStreamsEqual(sa, sb),
+            (PdfDictionary da, PdfDictionary db) => AreDictsEqual(da, db),
+            _ => false
+        };
+    }
+
+    private static bool AreArraysEqual(PdfArray a, PdfArray b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (!AreEqual(a[i], b[i])) return false;
+        }
+        return true;
+    }
+
+    private static bool AreDictsEqual(PdfDictionary a, PdfDictionary b)
+    {
+        if (a.Count != b.Count) return false;
+        foreach (var (key, valA) in a)
+        {
+            var valB = b.Get(key);
+            if (valB is null || !AreEqual(valA, valB)) return false;
+        }
+        return true;
+    }
+
+    private static bool AreStreamsEqual(PdfStream a, PdfStream b)
+    {
+        if (!AreDictsEqual(a.Dictionary, b.Dictionary)) return false;
+        try
+        {
+            var dataA = a.Contents.GetDecodedData();
+            var dataB = b.Contents.GetDecodedData();
+            return dataA.AsSpan().SequenceEqual(dataB.AsSpan());
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }
