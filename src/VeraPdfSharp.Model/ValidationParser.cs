@@ -374,6 +374,8 @@ internal sealed partial class PdfModelBuilder
     private readonly HashSet<string> _inconsistentSeparations = new(StringComparer.Ordinal);
     private bool _structureInitialized;
     private PdfDictionary? _currentPageDict;
+    // GTS_PDFA1-only output color space from the document catalog, used for gOutputCS in PDFA-1/2 rules.
+    private string? _pdfa1OutputCS;
 
     public PdfModelBuilder(PdfDocument document, PdfByteAnalysis analysis, string? sourceName)
     {
@@ -426,6 +428,9 @@ internal sealed partial class PdfModelBuilder
         // Pre-scan content streams to identify which form XObjects are actually
         // referenced (invoked via Do operator). veraPDF only validates referenced XObjects.
         PreScanReferencedFormXObjects();
+
+        // Pre-compute the GTS_PDFA1-only output CS for use by device CS rules (PDFA-1/2).
+        _pdfa1OutputCS = GetOutputColorSpace(_document.Catalog, pdfA1Only: true);
 
         var trailer = BuildObject(_document.Trailer, relationName: "trailer");
         var document = BuildObject(_document.Catalog, relationName: "document");
@@ -1054,6 +1059,11 @@ internal sealed partial class PdfModelBuilder
         if (string.Equals(model.ObjectType, "ICCOutputProfile", StringComparison.Ordinal))
         {
             PopulateIccProfile(model, stream);
+            // Set S from the parent PDOutputIntent dictionary
+            if (parentPdfObject?.Resolve() is PdfDictionary parentDict)
+            {
+                model.Set("S", ConvertPdfObjectToString(parentDict.Get(PdfName.S)));
+            }
             return;
         }
 
@@ -1444,6 +1454,12 @@ internal sealed partial class PdfModelBuilder
         {
             model.Link("formFields", formFields.ToArray());
         }
+
+        // outputColorSpace: used by gDocumentOutputCS variable in PDFA-4
+        model.Set("outputColorSpace", GetOutputColorSpace(catalog));
+
+        // OutputIntents wrapper: checks that multiple DestOutputProfile entries reference the same indirect object
+        CreateOutputIntentsWrapper(model, catalog);
     }
 
     private static bool ContainsMetadataStream(PdfStream? metadata) =>
@@ -1668,7 +1684,7 @@ internal sealed partial class PdfModelBuilder
         return false;
     }
 
-    private static string? GetOutputColorSpace(PdfDictionary container)
+    private static string? GetOutputColorSpace(PdfDictionary container, bool pdfA1Only = false)
     {
         // Look for output intents in the given dictionary (catalog or page)
         if (!container.TryGetValue<PdfArray>(new PdfName("OutputIntents"), out var intents, false))
@@ -1681,8 +1697,19 @@ internal sealed partial class PdfModelBuilder
                 continue;
 
             var subtype = ConvertPdfObjectToString(dict.Get(PdfName.Subtype)) ?? ConvertPdfObjectToString(dict.Get(new PdfName("S")));
-            if (string.Equals(subtype, "GTS_PDFA1", StringComparison.Ordinal) ||
-                string.Equals(subtype, "GTS_PDFX", StringComparison.Ordinal))
+            // gOutputCS (PDFA-1/2) considers only GTS_PDFA1 output intents.
+            // outputColorSpace (PDFA-4) considers any output intent with a DestOutputProfile.
+            if (pdfA1Only)
+            {
+                if (!string.Equals(subtype, "GTS_PDFA1", StringComparison.Ordinal))
+                    continue;
+            }
+            else
+            {
+                if (!string.Equals(subtype, "GTS_PDFA1", StringComparison.Ordinal) &&
+                    !string.Equals(subtype, "GTS_PDFX", StringComparison.Ordinal))
+                    continue;
+            }
             {
                 // Parse the ICC profile to extract the actual color space signature ("RGB ", "CMYK", "GRAY")
                 var destProfile = dict.GetOptionalValue<PdfStream>(DestOutputProfileName);
@@ -1717,9 +1744,11 @@ internal sealed partial class PdfModelBuilder
         model.Set("containsTransparency", HasTransparency(page));
 
         // Output color space from output intents
+        // outputColorSpace (for PDFA-4 gDocumentOutputCS/gPageOutputCS) considers any output intent.
+        // gOutputCS (for PDFA-1/2 device CS rules) uses _pdfa1OutputCS (GTS_PDFA1 only).
         var documentOutputCS = GetOutputColorSpace(_document.Catalog);
         var pageOutputCS = GetOutputColorSpace(page);
-        model.Set("gOutputCS", documentOutputCS);
+        model.Set("gOutputCS", _pdfa1OutputCS);
         model.Set("gDocumentOutputCS", documentOutputCS);
         model.Set("gPageOutputCS", pageOutputCS ?? documentOutputCS);
         model.Set("outputColorSpace", pageOutputCS ?? documentOutputCS);
@@ -1756,6 +1785,14 @@ internal sealed partial class PdfModelBuilder
 
         // Create color space model objects from page resources
         var colorSpaceObjects = CreateColorSpaceObjects(page, documentOutputCS, pageOutputCS, transparencyCS);
+
+        // Also create device CS objects from the page Group CS entry (transparency blending space).
+        // If the Group CS is a device color space it must match the output intent.
+        if (transparencyCS is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+        {
+            CreateDeviceColorSpaceObject(transparencyCS, colorSpaceObjects, documentOutputCS, pageOutputCS, transparencyCS);
+        }
+
         if (colorSpaceObjects.Count > 0)
         {
             model.Link("colorSpaces", colorSpaceObjects.ToArray());
@@ -2139,8 +2176,8 @@ internal sealed partial class PdfModelBuilder
         var flagsObj = annotation.Get(new PdfName("F"));
         model.Set("F", flagsObj is not null ? ConvertPdfObjectToString(flagsObj) : null);
 
-        // gOutputCS: document-level output color space
-        model.Set("gOutputCS", GetOutputColorSpace(_document.Catalog));
+        // gOutputCS: document-level output color space (GTS_PDFA1 only for PDFA-1/2 rules)
+        model.Set("gOutputCS", _pdfa1OutputCS);
     }
 
     private bool IsOutsideCropBox(PdfDictionary annotation, IPdfObject? parentPdfObject)
@@ -2202,7 +2239,74 @@ internal sealed partial class PdfModelBuilder
     private void PopulateOutputIntent(GenericModelObject model, PdfDictionary outputIntent)
     {
         model.Set("containsDestOutputProfileRef", outputIntent.ContainsKey(DestOutputProfileRefName));
-        model.Set("S", ConvertPdfObjectToString(outputIntent.Get(PdfName.S)));
+        var s = ConvertPdfObjectToString(outputIntent.Get(PdfName.S));
+        model.Set("S", s);
+        model.Set("OutputConditionIdentifier", ConvertPdfObjectToString(outputIntent.Get(new PdfName("OutputConditionIdentifier"))));
+
+        // destOutputProfileIndirect: string representation of the indirect object reference
+        var destProfileObj = outputIntent.Get(DestOutputProfileName);
+        if (destProfileObj is PdfIndirectRef indRef)
+        {
+            model.Set("destOutputProfileIndirect", indRef.ToString());
+        }
+        else if (destProfileObj is not null)
+        {
+            model.Set("destOutputProfileIndirect", destProfileObj.ToString());
+        }
+
+        // ICCProfileMD5: compute MD5 hash of the ICC profile data
+        var destProfileStream = outputIntent.GetOptionalValue<PdfStream>(DestOutputProfileName);
+        if (destProfileStream is not null)
+        {
+            try
+            {
+                var bytes = destProfileStream.Contents.GetDecodedData();
+                var hash = System.Security.Cryptography.MD5.HashData(bytes);
+                model.Set("ICCProfileMD5", Convert.ToHexString(hash).ToLowerInvariant());
+            }
+            catch
+            {
+                // If we can't decode the stream, leave null
+            }
+        }
+    }
+
+    private void CreateOutputIntentsWrapper(GenericModelObject parentModel, PdfDictionary container)
+    {
+        if (!container.TryGetValue<PdfArray>(new PdfName("OutputIntents"), out var intents, false))
+            return;
+        if (intents.Count == 0)
+            return;
+
+        var wrapper = new GenericModelObject("OutputIntents");
+
+        // Collect indirect references for DestOutputProfile entries
+        var profileIndirects = new List<string>();
+        foreach (var intent in intents)
+        {
+            var dict = intent.Resolve() as PdfDictionary;
+            if (dict is null)
+                continue;
+
+            var destProfileObj = dict.Get(DestOutputProfileName);
+            if (destProfileObj is PdfIndirectRef indRef)
+            {
+                profileIndirects.Add(indRef.ToString());
+            }
+            else if (destProfileObj is not null && destProfileObj.Resolve() is PdfStream)
+            {
+                // Has a DestOutputProfile but not via indirect ref — use string identity
+                profileIndirects.Add(destProfileObj.ToString()!);
+            }
+        }
+
+        // sameOutputProfileIndirect: true if 0 or 1 profiles, or if all indirect refs are identical
+        bool sameProfile = profileIndirects.Count <= 1 ||
+                           profileIndirects.Distinct(StringComparer.Ordinal).Count() == 1;
+        wrapper.Set("sameOutputProfileIndirect", sameProfile);
+        wrapper.Set("outputProfileIndirects", string.Join(",", profileIndirects));
+
+        parentModel.Link("outputIntents", wrapper);
     }
 
     private static void PopulateExtGState(GenericModelObject model, PdfDictionary extGState)
@@ -3672,7 +3776,7 @@ internal sealed partial class PdfModelBuilder
         }
     }
 
-    private static void CreateDeviceColorSpaceObject(string csName, List<IModelObject> result,
+    private void CreateDeviceColorSpaceObject(string csName, List<IModelObject> result,
         string? documentOutputCS, string? pageOutputCS, string? transparencyCS)
     {
         string? objectType = csName switch
@@ -3685,7 +3789,7 @@ internal sealed partial class PdfModelBuilder
         if (objectType is null) return;
 
         var cs = new GenericModelObject(objectType);
-        cs.Set("gOutputCS", documentOutputCS);
+        cs.Set("gOutputCS", _pdfa1OutputCS);
         cs.Set("gPageOutputCS", pageOutputCS ?? documentOutputCS);
         cs.Set("gDocumentOutputCS", documentOutputCS);
         cs.Set("gTransparencyCS", transparencyCS);

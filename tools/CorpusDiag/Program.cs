@@ -9,13 +9,16 @@ using VeraPdfSharp.Validation;
 var corpusBase = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "veraPDF-corpus-staging"));
 
 var diagFiles = new[] {
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-f.pdf", PDFAFlavour.PDFA4),
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-g.pdf", PDFAFlavour.PDFA4),
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t03-fail-g.pdf", PDFAFlavour.PDFA4),
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t06-fail-f.pdf", PDFAFlavour.PDFA4),
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t07-fail-f.pdf", PDFAFlavour.PDFA4),
-    // Also check a passing file for comparison
-    (@"PDF_A-4\6.2 Graphics\6.2.9 Transparency\veraPDF test suite 6-2-9-t01-fail-a.pdf", PDFAFlavour.PDFA4),
+    // Output intent failures
+    (@"PDF_A-2b\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t01-fail-a.pdf", PDFAFlavour.PDFA2B),
+    (@"PDF_A-2b\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t01-fail-c.pdf", PDFAFlavour.PDFA2B),
+    (@"PDF_A-2b\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t02-fail-a.pdf", PDFAFlavour.PDFA2B),
+    (@"PDF_A-4\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t01-fail-a.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t02-fail-a.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-4\6.2 Graphics\6.2.3 Output intent\veraPDF test suite 6-2-3-t05-fail-a.pdf", PDFAFlavour.PDFA4),
+    // ICCBased failures
+    (@"PDF_A-4\6.2 Graphics\6.2.4 Colour spaces\6.2.4.2 ICCBased colour spaces\veraPDF test suite 6-2-4-2-t03-fail-a.pdf", PDFAFlavour.PDFA4),
+    (@"PDF_A-2b\6.2 Graphics\6.2.4.2 ICCBased colour spaces\veraPDF test suite 6-2-4-2-t02-fail-a.pdf", PDFAFlavour.PDFA2B),
 };
 
 foreach (var (relPath, flavour) in diagFiles)
@@ -129,16 +132,19 @@ foreach (var (relPath, flavour) in diagFiles)
     foreach (var a in result.TestAssertions.Where(x => x.Status == TestAssertionStatus.Failed).Take(10))
         Console.WriteLine($"  FAIL: {a.RuleId} - {a.Description?.Substring(0, Math.Min(120, a.Description?.Length ?? 0))}");
 
-    // Dump PDPage objects with transparency properties
+    // Dump relevant model objects
     var visited = new HashSet<IModelObject>(ReferenceEqualityComparer.Instance);
     void DumpObjects(IModelObject obj, int depth = 0)
     {
         if (!visited.Add(obj) || depth > 10) return;
-        if (obj.ObjectType == "PDPage")
+        var t = obj.ObjectType;
+        if (t is "PDPage" or "PDOutputIntent" or "ICCOutputProfile" or "ICCInputProfile" 
+             or "OutputIntents" or "PDICCBasedCMYK"
+             or "PDDeviceRGB" or "PDDeviceCMYK" or "PDDeviceGray"
+             or "PDSeparation" or "PDDeviceN")
         {
-            var props = new[] { "containsGroupCS", "containsTransparency", "gOutputCS", "gDocumentOutputCS", "gPageOutputCS", "outputColorSpace", "gTransparencyCS" };
-            var vals = string.Join(", ", props.Select(p => $"{p}={obj.GetPropertyValue(p) ?? "null"}"));
-            Console.WriteLine($"  PDPage: [{vals}]");
+            var allProps = string.Join(", ", obj.Properties.Select(p => $"{p}={obj.GetPropertyValue(p) ?? "null"}"));
+            Console.WriteLine($"  {"".PadLeft(depth*2)}OBJ: {t} [{allProps}]");
         }
         foreach (var ln in obj.Links) foreach (var lo in obj.GetLinkedObjects(ln)) DumpObjects(lo, depth + 1);
     }

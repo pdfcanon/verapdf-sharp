@@ -1,5 +1,5 @@
-param([string]$Filter = 'Transparency')
-$trx = [xml](Get-Content "tests\VeraPdfSharp.Tests\TestResults\corpus_results_phase6a.trx")
+param([string]$Filter = 'Transparency', [string]$TrxFile = 'corpus_results_phase6b.trx')
+$trx = [xml](Get-Content "tests\VeraPdfSharp.Tests\TestResults\$TrxFile")
 $ns = @{t='http://microsoft.com/schemas/VisualStudio/TeamTest/2010'}
 $results = Select-Xml -Xml $trx -XPath "//t:UnitTestResult[@outcome='Failed']" -Namespace $ns
 $files = @()
