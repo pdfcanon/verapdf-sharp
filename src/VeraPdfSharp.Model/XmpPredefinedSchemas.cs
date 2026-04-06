@@ -500,22 +500,34 @@ internal sealed partial class PdfModelBuilder
         // Lang alt
         if (simplified.EndsWith(" lang alt", StringComparison.Ordinal) || simplified == "lang alt")
         {
-            return node is XElement el && el.Elements(NsRdf + "Alt").Any();
+            if (node is not XElement el) return false;
+            var alt = el.Element(NsRdf + "Alt");
+            if (alt is null) return false;
+            // Each rdf:li in a lang Alt MUST have xml:lang attribute
+            var items = alt.Elements(NsRdf + "li").ToList();
+            if (items.Count == 0) return false;
+            var xmlLang = XNamespace.Xml + "lang";
+            foreach (var item in items)
+            {
+                if (item.Attribute(xmlLang) is null)
+                    return false;
+            }
+            return true;
         }
 
-        // Array types: bag X, seq X, alt X
+        // Array types: bag X, seq X, alt X — validate container AND item values
         if (simplified.StartsWith("bag ", StringComparison.Ordinal))
-            return ValidateArray(node, "bag");
+            return ValidateArray(node, "bag", simplified.Substring(4));
         if (simplified.StartsWith("seq ", StringComparison.Ordinal))
-            return ValidateArray(node, "seq");
+            return ValidateArray(node, "seq", simplified.Substring(4));
         if (simplified.StartsWith("alt ", StringComparison.Ordinal))
-            return ValidateArray(node, "alt");
+            return ValidateArray(node, "alt", simplified.Substring(4));
 
         // Simple or structured type
         return ValidateSimpleOrStructuredType(node, simplified);
     }
 
-    private static bool ValidateArray(XObject node, string kind)
+    private static bool ValidateArray(XObject node, string kind, string itemType)
     {
         if (node is not XElement el) return false;
 
@@ -523,13 +535,36 @@ internal sealed partial class PdfModelBuilder
         var hasSeq = el.Elements(NsRdf + "Seq").Any();
         var hasAlt = el.Elements(NsRdf + "Alt").Any();
 
-        return kind switch
+        bool containerCorrect = kind switch
         {
             "bag" => hasBag && !hasSeq && !hasAlt,
             "seq" => hasSeq && !hasAlt,
             "alt" => hasAlt,
             _ => false,
         };
+
+        if (!containerCorrect) return false;
+
+        // Also validate item values inside the container against the item type
+        var containerName = kind switch { "bag" => "Bag", "seq" => "Seq", "alt" => "Alt", _ => null };
+        if (containerName is null) return false;
+
+        var container = el.Element(NsRdf + containerName);
+        if (container is null) return false;
+
+        var items = container.Elements(NsRdf + "li").ToList();
+        // Validate simple (text-only) items against the item type.
+        // Skip items with child elements (structured values) — their structure
+        // is valid in XMP and doesn't need simple-type validation.
+        foreach (var item in items)
+        {
+            if (item.HasElements)
+                continue;
+            if (!IsSimpleValueCorrect(item.Value.Trim(), itemType))
+                return false;
+        }
+
+        return true;
     }
 
     private static bool ValidateSimpleOrStructuredType(XObject node, string type)

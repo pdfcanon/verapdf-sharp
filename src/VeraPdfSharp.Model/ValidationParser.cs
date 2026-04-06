@@ -1057,6 +1057,47 @@ internal sealed partial class PdfModelBuilder
         dictionary.ContainsKey(BMName) ||
         dictionary.ContainsKey(SMaskName);
 
+    /// <summary>
+    /// Computes a comma-separated list of inherited resource category names for a content stream.
+    /// If the parent (page or form XObject) has its own /Resources entry, returns "".
+    /// Otherwise walks the Pages tree to find inherited /Resources and returns category names.
+    /// </summary>
+    private static string ComputeInheritedResourceNames(IPdfObject? parentPdfObject)
+    {
+        if (parentPdfObject?.Resolve() is not PdfDictionary parentDict)
+            return "";
+
+        // PdfLexer's EnumeratePages copies inherited /Resources into page dicts, so ContainsKey
+        // always returns true after page tree enumeration. To detect inheritance, compare the
+        // page's /Resources with ancestors' — if same reference, it was inherited.
+        var pageResources = parentDict.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+        if (pageResources is null)
+            return "";
+
+        // Walk up the Pages tree to check if /Resources is inherited (same reference as an ancestor)
+        var ancestor = parentDict.GetOptionalValue<PdfDictionary>(PdfName.Parent);
+        while (ancestor is not null)
+        {
+            var ancestorResources = ancestor.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+            if (ancestorResources is not null)
+            {
+                if (ReferenceEquals(pageResources, ancestorResources))
+                {
+                    // The page's Resources IS the ancestor's — it was inherited
+                    var names = ancestorResources.Keys
+                        .Select(k => k.Value)
+                        .Where(k => k != "ProcSet")
+                        .OrderBy(k => k, StringComparer.Ordinal);
+                    return string.Join(",", names);
+                }
+                break; // Ancestor has Resources but different object — page has its own
+            }
+            ancestor = ancestor.GetOptionalValue<PdfDictionary>(PdfName.Parent);
+        }
+
+        return "";
+    }
+
     private void PopulateStreamObject(GenericModelObject model, PdfStream stream, ObjectDescriptor descriptor, string? relationName, IPdfObject? parentPdfObject)
     {
         PopulateDictionaryObject(model, stream.Dictionary, descriptor, relationName, parentPdfObject);
@@ -1076,6 +1117,15 @@ internal sealed partial class PdfModelBuilder
             }
         }
 
+        // PdfLexer auto-repairs mismatched /Length values by updating the dictionary.
+        // To detect Length mismatches (rule 6.1.7.1/1), extract the ORIGINAL declared
+        // Length from the raw PDF bytes and override the generic-traversal value.
+        var originalLength = GetOriginalDeclaredStreamLength(stream);
+        if (originalLength is not null)
+        {
+            model.Set("Length", originalLength.Value);
+        }
+
         // stream/endstream keyword compliance (byte-level checks)
         var (streamCRLF, endstreamEOL) = GetStreamKeywordCompliance(stream);
         model.Set("streamKeywordCRLFCompliant", streamCRLF);
@@ -1092,7 +1142,7 @@ internal sealed partial class PdfModelBuilder
         // PDContentStream needs inheritedResourceNames and undefinedResourceNames
         if (string.Equals(model.ObjectType, "PDContentStream", StringComparison.Ordinal))
         {
-            model.Set("inheritedResourceNames", "");
+            model.Set("inheritedResourceNames", ComputeInheritedResourceNames(parentPdfObject));
             model.Set("undefinedResourceNames", "");
         }
 
@@ -1155,6 +1205,7 @@ internal sealed partial class PdfModelBuilder
             model.Set("containsRef", stream.Dictionary.ContainsKey(RefName));
             model.Set("Subtype2", ConvertPdfObjectToString(stream.Dictionary.Get(new PdfName("Subtype2"))));
             model.Set("isUniqueSemanticParent", IsUniqueSemanticParent(stream));
+            LinkXFormContentStream(model, stream);
         }
 
         // Create CosFilter objects from /Filter entries on all streams
@@ -1213,6 +1264,64 @@ internal sealed partial class PdfModelBuilder
         var declaredLength = stream.Dictionary.GetOptionalValue<PdfNumber>(PdfName.Length);
         var length = declaredLength is not null ? (int)(double)declaredLength : contents.Length;
         return _analysis.CheckStreamKeywordCompliance(offset, length);
+    }
+
+    /// <summary>
+    /// Extracts the ORIGINAL declared /Length value from the raw PDF bytes before PdfLexer
+    /// may have repaired it. Scans backward from the stream data offset to find /Length.
+    /// Returns null if the original value cannot be determined.
+    /// </summary>
+    private int? GetOriginalDeclaredStreamLength(PdfStream stream)
+    {
+        if (s_offsetProp is null) return null;
+        var contents = stream.Contents;
+        if (contents.GetType() != s_offsetProp.DeclaringType) return null;
+
+        var dataOffset = (long)s_offsetProp.GetValue(contents)!;
+        var rawBytes = _analysis.RawBytes;
+        if (dataOffset <= 0 || dataOffset >= rawBytes.Length) return null;
+
+        // The stream data starts right after the "stream" keyword + CRLF/LF.
+        // Scan backward from dataOffset to find /Length in the dictionary bytes.
+        var searchStart = (int)Math.Max(0, dataOffset - 512);
+        var searchEnd = (int)dataOffset;
+
+        // Look for "/Length " (including trailing space) in raw bytes
+        ReadOnlySpan<byte> pattern = "/Length "u8;
+        var lastIdx = -1;
+        for (var i = searchEnd - pattern.Length; i >= searchStart; i--)
+        {
+            if (rawBytes.AsSpan(i, pattern.Length).SequenceEqual(pattern))
+            {
+                lastIdx = i;
+                break;
+            }
+        }
+        if (lastIdx < 0) return null;
+
+        // Parse the numeric value after /Length 
+        var numStart = lastIdx + pattern.Length;
+        var numEnd = numStart;
+        while (numEnd < searchEnd && rawBytes[numEnd] >= (byte)'0' && rawBytes[numEnd] <= (byte)'9')
+            numEnd++;
+
+        if (numEnd == numStart) return null;
+
+        // Check if this is an indirect reference (e.g., "/Length 12 0 R")
+        // If so, we can't extract the original value from raw bytes — return null
+        var afterNum = numEnd;
+        while (afterNum < searchEnd && (rawBytes[afterNum] == (byte)' ' || rawBytes[afterNum] == (byte)'\t'))
+            afterNum++;
+        if (afterNum < searchEnd && rawBytes[afterNum] >= (byte)'0' && rawBytes[afterNum] <= (byte)'9')
+        {
+            // Looks like generation number following object number — indirect reference
+            return null;
+        }
+
+        if (int.TryParse(System.Text.Encoding.ASCII.GetString(rawBytes, numStart, numEnd - numStart), out var originalLength))
+            return originalLength;
+
+        return null;
     }
 
     private void PopulateDictionaryObject(GenericModelObject model, PdfDictionary dictionary, ObjectDescriptor descriptor, string? relationName, IPdfObject? parentPdfObject)
@@ -3273,8 +3382,135 @@ internal sealed partial class PdfModelBuilder
             LinkCMapFileObjects(model, cmapStream);
         }
 
+        // Type3 font char procs are content streams that may inherit page resources
+        if (string.Equals(subtype, "Type3", StringComparison.Ordinal))
+        {
+            LinkType3CharProcContentStreams(model, font);
+        }
+
         LinkTrueTypeFontProgram(font);
         UpdateFontCoverageProperties(font);
+    }
+
+    /// <summary>
+    /// Creates a PDContentStream model object linked from a PDXForm.
+    /// The XForm body IS the content stream. If the XForm lacks its own /Resources,
+    /// scans the stream to determine which page resource categories it uses.
+    /// </summary>
+    private void LinkXFormContentStream(GenericModelObject xformModel, PdfStream xformStream)
+    {
+        var hasOwnResources = xformStream.Dictionary.ContainsKey(PdfName.Resources);
+        string inherited = "";
+
+        if (!hasOwnResources && _currentPageDict is not null)
+        {
+            var pageResources = _currentPageDict.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+            if (pageResources is not null)
+            {
+                var pageResourceCategories = new HashSet<string>(
+                    pageResources.Keys.Select(k => k.Value).Where(k => k != "ProcSet"),
+                    StringComparer.Ordinal);
+
+                if (pageResourceCategories.Count > 0)
+                {
+                    var referencedCategories = ScanCharProcResourceCategories(xformStream);
+                    var inheritedCats = referencedCategories
+                        .Where(c => pageResourceCategories.Contains(c))
+                        .OrderBy(c => c, StringComparer.Ordinal);
+                    inherited = string.Join(",", inheritedCats);
+                }
+            }
+        }
+
+        var csModel = new GenericModelObject("PDContentStream");
+        csModel.Set("inheritedResourceNames", inherited);
+        csModel.Set("undefinedResourceNames", "");
+        xformModel.Link("contentStream", csModel);
+    }
+
+    /// <summary>
+    /// Creates PDContentStream model objects for Type3 font char proc streams.
+    /// Sets inheritedResourceNames when the Type3 font lacks its own /Resources
+    /// and a char proc actually references resources.
+    /// </summary>
+    private void LinkType3CharProcContentStreams(GenericModelObject fontModel, PdfDictionary font)
+    {
+        var charProcs = font.GetOptionalValue<PdfDictionary>(new PdfName("CharProcs"));
+        if (charProcs is null) return;
+
+        var hasOwnResources = font.ContainsKey(PdfName.Resources);
+
+        // Collect available inherited resource categories from the page
+        HashSet<string>? pageResourceCategories = null;
+        if (!hasOwnResources && _currentPageDict is not null)
+        {
+            var pageResources = _currentPageDict.GetOptionalValue<PdfDictionary>(PdfName.Resources);
+            if (pageResources is not null)
+            {
+                pageResourceCategories = new HashSet<string>(
+                    pageResources.Keys.Select(k => k.Value).Where(k => k != "ProcSet"),
+                    StringComparer.Ordinal);
+            }
+        }
+
+        var charStringModels = new List<IModelObject>();
+        foreach (var key in charProcs.Keys)
+        {
+            if (charProcs.Get(key)?.Resolve() is not PdfStream procStream) continue;
+
+            string inherited = "";
+            if (!hasOwnResources && pageResourceCategories is not null && pageResourceCategories.Count > 0)
+            {
+                // Scan char proc content to find which resource categories it references
+                var referencedCategories = ScanCharProcResourceCategories(procStream);
+                // Only report categories that exist in the page resources
+                var inheritedCats = referencedCategories
+                    .Where(c => pageResourceCategories.Contains(c))
+                    .OrderBy(c => c, StringComparer.Ordinal);
+                inherited = string.Join(",", inheritedCats);
+            }
+
+            var csModel = new GenericModelObject("PDContentStream");
+            csModel.Set("inheritedResourceNames", inherited);
+            csModel.Set("undefinedResourceNames", "");
+            charStringModels.Add(csModel);
+        }
+        if (charStringModels.Count > 0)
+            fontModel.Link("charStrings", charStringModels.ToArray());
+    }
+
+    /// <summary>
+    /// Scans a char proc content stream for PDF operators that reference resources by name.
+    /// Returns the set of resource category names (Font, ColorSpace, ExtGState, etc.) used.
+    /// </summary>
+    private static HashSet<string> ScanCharProcResourceCategories(PdfStream stream)
+    {
+        var categories = new HashSet<string>(StringComparer.Ordinal);
+        byte[] data;
+        try { data = stream.Contents.GetDecodedData(); }
+        catch { return categories; }
+
+        var text = System.Text.Encoding.ASCII.GetString(data);
+        // Match /<name> followed by a resource-referencing operator
+        // Operators and their resource categories:
+        //   cs/CS → ColorSpace, Tf → Font, Do → XObject, gs → ExtGState, sh → Shading
+        var matches = System.Text.RegularExpressions.Regex.Matches(text,
+            @"/\S+\s+(?:cs|CS)\b|/\S+\s+[\d.]+\s+Tf\b|/\S+\s+Do\b|/\S+\s+gs\b|/\S+\s+sh\b");
+        foreach (System.Text.RegularExpressions.Match m in matches)
+        {
+            var val = m.Value;
+            if (val.Contains(" cs", StringComparison.Ordinal) || val.Contains(" CS", StringComparison.Ordinal))
+                categories.Add("ColorSpace");
+            if (val.Contains(" Tf", StringComparison.Ordinal))
+                categories.Add("Font");
+            if (val.Contains(" Do", StringComparison.Ordinal))
+                categories.Add("XObject");
+            if (val.Contains(" gs", StringComparison.Ordinal) && !val.Contains(" cs", StringComparison.Ordinal) && !val.Contains(" CS", StringComparison.Ordinal))
+                categories.Add("ExtGState");
+            if (val.Contains(" sh", StringComparison.Ordinal))
+                categories.Add("Shading");
+        }
+        return categories;
     }
 
     private void LinkCMapFileObjects(GenericModelObject fontModel, PdfStream cmapStream)
@@ -3730,14 +3966,6 @@ internal sealed partial class PdfModelBuilder
             }
         }
 
-        // DEBUG: print top dict info
-        {
-            var topStr = topFontMatrix is null ? "null" : $"[{string.Join(",", topFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
-            Console.Error.WriteLine($"[CFF-TOP] isCid={isCid} topFM={topStr} fdArrayOff={fdArrayOffset} fdSelOff={fdSelectOffset} charStringsCount={charStringsOffset}");
-            // Also dump all top dict keys
-            Console.Error.WriteLine($"[CFF-TOP-KEYS] {string.Join(", ", topDict.Select(e => $"op={e.key}(vals={e.values.Length})"))}");
-        }
-
         if (isCid)
         {
             var fdPos = fdArrayOffset;
@@ -3771,12 +3999,6 @@ internal sealed partial class PdfModelBuilder
                 // Calculate effective FontMatrix: topFM × perFdFM (or whichever is available)
                 var effectiveFm = CffCalculateEffectiveMatrix(topFontMatrix, perFdFontMatrix);
                 fdWidthScales[i] = CffIsDefaultFontMatrix(effectiveFm) ? 1.0 : effectiveFm[0] * 1000.0;
-
-                // DEBUG: output per-FD matrix info
-                var topStr = topFontMatrix is null ? "null" : $"[{string.Join(",", topFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
-                var perStr = perFdFontMatrix is null ? "null" : $"[{string.Join(",", perFdFontMatrix.Take(6).Select(v => v.ToString("G")))}]";
-                var effStr = $"[{string.Join(",", effectiveFm.Take(6).Select(v => v.ToString("G")))}]";
-                Console.Error.WriteLine($"[CFF-DEBUG] FD[{i}]: topFM={topStr} perFdFM={perStr} effectiveFM={effStr} scale={fdWidthScales[i]:G}");
             }
 
             // Parse FDSelect
@@ -4185,9 +4407,28 @@ internal sealed partial class PdfModelBuilder
         {
             int b = data[pos];
 
+            // CharString Type 2: byte 28 = ShortInt (push 2-byte signed integer)
+            if (b == 28 && pos + 2 < end)
+            {
+                var val = (short)((data[pos + 1] << 8) | data[pos + 2]);
+                stack.Add(val);
+                pos += 3;
+                continue;
+            }
+
+            // CharString Type 2: byte 255 = Fixed-point 16.16
+            if (b == 255 && pos + 4 < end)
+            {
+                var intPart = (short)((data[pos + 1] << 8) | data[pos + 2]);
+                var fracPart = (data[pos + 3] << 8) | data[pos + 4];
+                stack.Add(intPart + fracPart / 65536.0);
+                pos += 5;
+                continue;
+            }
+
             if (b >= 32)
             {
-                // Operand
+                // Operand (1-4 byte encodings for values 32-254)
                 stack.Add(CffParseCharstringOperand(data, ref pos));
                 continue;
             }
